@@ -19,7 +19,6 @@ A full-stack web application for managing academic competitions at the **Univers
 - [Key Features](#-key-features)
 - [System Architecture](#-system-architecture)
 - [Technology Stack](#-technology-stack)
-- [Project Structure](#-project-structure)
 - [Getting Started](#-getting-started)
 - [Application Workflow](#-application-workflow)
 - [Modules](#-modules)
