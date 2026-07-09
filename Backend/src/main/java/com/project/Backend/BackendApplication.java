@@ -8,8 +8,10 @@ import java.util.Set;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import com.project.Backend.Auth.Role;
 import com.project.Backend.Competition.Competition;
 import com.project.Backend.Competition.CompetitionRepository;
 import com.project.Backend.CompetitionRegistration.CompetitionRegistration;
@@ -18,8 +20,8 @@ import com.project.Backend.CompetitionRegistration.RegistrationStatus;
 import com.project.Backend.Evaluation.Evaluation;
 import com.project.Backend.Milestone.Milestone;
 import com.project.Backend.Milestone.MilestoneRepository;
-import com.project.Backend.MyExternalParticipation.ExternalParticipation;
-import com.project.Backend.MyExternalParticipation.ExternalParticipationRepository;
+import com.project.Backend.MyExternalParticipation.MyExternalParticipation;
+import com.project.Backend.MyExternalParticipation.MyExternalParticipationRepository;
 import com.project.Backend.Notification.Notification;
 import com.project.Backend.Notification.NotificationRepository;
 import com.project.Backend.Notification.NotificationType;
@@ -29,11 +31,11 @@ import com.project.Backend.Submission.SubmissionStatus;
 import com.project.Backend.Team.Team;
 import com.project.Backend.Team.TeamRepository;
 import com.project.Backend.Team.TeamStatus;
-import com.project.Backend.User.Role;
 import com.project.Backend.User.User;
 import com.project.Backend.User.UserRepository;
 
 @SpringBootApplication
+@EnableScheduling
 public class BackendApplication {
 
         public static void main(String[] args) {
@@ -49,7 +51,7 @@ public class BackendApplication {
                         SubmissionRepository submissionRepository,
                         MilestoneRepository milestoneRepository,
                         NotificationRepository notificationRepository,
-                        ExternalParticipationRepository externalParticipationRepository,
+                        MyExternalParticipationRepository externalParticipationRepository,
                         PasswordEncoder passwordEncoder) {
                 return args -> {
                         seedSystemTestData(
@@ -73,7 +75,7 @@ public class BackendApplication {
                         SubmissionRepository submissionRepository,
                         MilestoneRepository milestoneRepository,
                         NotificationRepository notificationRepository,
-                        ExternalParticipationRepository externalParticipationRepository,
+                        MyExternalParticipationRepository externalParticipationRepository,
                         PasswordEncoder passwordEncoder) {
                 LocalDateTime now = LocalDateTime.now();
                 String rawSeedPassword = "SeedPass123!";
@@ -539,7 +541,7 @@ public class BackendApplication {
                                                 now.minusHours(1)));
                 notificationRepository.saveAll(notifications);
 
-                List<ExternalParticipation> externalParticipations = List.of(
+                List<MyExternalParticipation> externalParticipations = List.of(
                                 seedExternalParticipation(
                                                 "E-SEED-EXT-01",
                                                 "U-SEED-STU-01",
@@ -768,7 +770,7 @@ public class BackendApplication {
                         Integer points) {
                 return Milestone.builder()
                                 .milestoneId(milestoneId)
-                                .userId(userId)
+                                .studentId(userId)
                                 .title(title)
                                 .achievedAt(achievedAt)
                                 .points(points)
@@ -796,7 +798,7 @@ public class BackendApplication {
                 return notification;
         }
 
-        private ExternalParticipation seedExternalParticipation(
+        private MyExternalParticipation seedExternalParticipation(
                         String id,
                         String ownerId,
                         String title,
@@ -821,7 +823,7 @@ public class BackendApplication {
                         LocalDate submittedAt,
                         LocalDateTime createdAt,
                         LocalDateTime updatedAt) {
-                ExternalParticipation ep = new ExternalParticipation();
+                MyExternalParticipation ep = new MyExternalParticipation();
                 ep.setId(id);
                 ep.setOwnerId(ownerId);
                 ep.setTitle(title);

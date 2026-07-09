@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Link } from "react-router-dom";
 import { 
   Plus, FileText, Calendar, MapPin, Globe, Award, 
   Clock, CheckCircle2, XCircle, AlertCircle, Eye, Edit3, 
@@ -6,8 +7,11 @@ import {
 } from "lucide-react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { API_BASE_URL, resolveFileUrl } from "@/lib/api";
+import { API_BASE_URL, fetchJsonCached, invalidateApiCache, resolveFileUrl } from "@/lib/api";
+import { formatReadableDate, formatReadableDateTime } from "@/lib/date";
+import { toast } from "sonner";
 
 const categoryOptions = [
   "Hackathon",
@@ -22,103 +26,110 @@ const categoryOptions = [
   "Other"
 ];
 
+const findKnownCategoryOption = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  return (
+    categoryOptions.find(
+      (option) => option.toLowerCase() === raw.toLowerCase(),
+    ) || null
+  );
+};
+
 const modeOptions = ["Online", "Physical", "Hybrid"];
 const scaleOptions = ["Local", "National", "International"];
 
-const participationResultOptions = [
-  "Winner",
-  "1st Runner Up",
-  "2nd Runner Up",
-  "3rd Place",
-  "Top 5",
-  "Top 10",
-  "Finalist",
-  "Participant"
-];
-const eligibilityOptionsList = [
-  "Open to all students",
-  "Undergraduate only",
-  "Postgraduate only",
-  "Specific majors",
-  "CS/IT only",
-  "Engineering only"
-];
-const sourceConfirmOptions = [
-  "Official website",
-  "University announcement",
-  "Email from organizer",
-  "Social media post"
-];
-
-const mockMyExternalCompetitions = [
-  {
-    id: 1,
-    title: "Google Developer Student Clubs Hackathon",
-    category: "Hackathon",
-    organizer: "Google DSC",
-    mode: "Hybrid",
-    location: "University Campus & Online",
-    scale: "National",
-    description: "Built an AI-powered accessibility tool for visually impaired users.",
-    eligibility: "University students only",
-    startDate: "2024-02-15",
-    endDate: "2024-02-17",
-    websiteLink: "https://gdsc.community.dev",
-    participationResult: "1st Runner Up",
-    proofFiles: ["certificate.pdf", "photo.jpg"],
-    status: "approved", // pending, approved, rejected
-    submittedAt: "2024-02-20",
-    adminNote: "Verified with official GDSC records.",
-  },
-  {
-    id: 2,
-    title: "AWS Cloud Computing Workshop",
-    category: "Workshop",
-    organizer: "Amazon Web Services",
-    mode: "Online",
-    location: "Virtual",
-    scale: "International",
-    description: "Completed 40-hour intensive cloud architecture workshop.",
-    eligibility: "Open to all",
-    startDate: "2024-01-10",
-    endDate: "2024-01-15",
-    websiteLink: "https://aws.amazon.com",
-    participationResult: "Participant",
-    proofFiles: ["aws-certificate.pdf"],
-    status: "pending",
-    submittedAt: "2024-01-20",
-  },
-  {
-    id: 3,
-    title: "Regional Math Olympiad",
-    category: "Olympiad",
-    organizer: "Math Association",
-    mode: "Physical",
-    location: "City Convention Center",
-    scale: "Local",
-    description: "Competed in advanced mathematics problem solving.",
-    eligibility: "High school and university students",
-    startDate: "2024-03-01",
-    endDate: "2024-03-01",
-    websiteLink: "",
-    participationResult: "Top 10",
-    proofFiles: ["result-card.pdf"],
-    status: "rejected",
-    submittedAt: "2024-03-05",
-    adminNote: "Please provide official certificate from organizer.",
-  },
-];
-
-const statusStyles = {
-  pending: "bg-warning/10 text-warning border-warning/20",
-  approved: "bg-success/10 text-success border-success/20",
-  rejected: "bg-destructive/10 text-destructive border-destructive/20",
-};
-
+// Status mappings
 const statusIcons = {
-  pending: Clock,
   approved: CheckCircle2,
   rejected: XCircle,
+  pending: Clock,
+  confirmed: Clock,
+};
+
+const statusStyles = {
+  approved: "border-success bg-success/10 text-success",
+  rejected: "border-destructive bg-destructive/10 text-destructive",
+  pending: "border-warning bg-warning/10 text-warning",
+  confirmed: "border-info bg-info/10 text-info",
+};
+
+const eligibilityOptionsList = [
+  "Students Only",
+  "Open to All",
+  "By Invitation",
+  "Alumni",
+];
+
+const sourceConfirmOptions = [
+  "Official Website",
+  "Organizer Email",
+  "Certificate / Letter",
+  "Other",
+];
+
+const formatDateTimeLabel = (value) => {
+  return formatReadableDateTime(value, { fallback: "-" });
+};
+
+const formatDateLabel = (value) => formatReadableDate(value, "-");
+
+const parseDateOnly = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const datePart = raw.match(/^\d{4}-\d{2}-\d{2}/)?.[0] || raw.split("T")[0];
+  const parsed = new Date(`${datePart}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const isBeforeSubmissionStart = (competition) => {
+  const endDate = parseDateOnly(competition?.endDate);
+  if (!endDate) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return today.getTime() < endDate.getTime();
+};
+
+const getSubmissionStartLabel = (competition) => formatDateLabel(competition?.endDate);
+
+const extractDisplayFileName = (fileRef, fallback = "Proof File") => {
+  if (!fileRef || typeof fileRef !== "string") return fallback;
+  const trimmed = fileRef.trim();
+  if (!trimmed) return fallback;
+
+  const decode = (value) => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+
+  const directSegments = trimmed.split("/").filter(Boolean);
+  const directTail = decode(directSegments[directSegments.length - 1] || "");
+  if (directTail && !/^[a-f0-9]{24}$/i.test(directTail)) {
+    return directTail;
+  }
+
+  try {
+    const parsed = new URL(trimmed, window.location.origin);
+    const queryName =
+      parsed.searchParams.get("filename") || parsed.searchParams.get("name");
+    if (queryName) return decode(queryName);
+    const pathSegments = parsed.pathname.split("/").filter(Boolean);
+    if (
+      pathSegments.length >= 4 &&
+      pathSegments[0] === "api" &&
+      pathSegments[1] === "files"
+    ) {
+      const withName = decode(pathSegments.slice(3).join("/"));
+      if (withName) return withName;
+    }
+  } catch {
+    // fall through
+  }
+
+  return fallback;
 };
 
 export default function MyExternalCompetitions() {
@@ -126,50 +137,89 @@ export default function MyExternalCompetitions() {
   const [competitions, setCompetitions] = useState([]);
   const [selectedCompetition, setSelectedCompetition] = useState(null);
   const [showEditForm, setShowEditForm] = useState(false);
-  const [proofUploadFiles, setProofUploadFiles] = useState([]);
   const [declarationChecked, setDeclarationChecked] = useState(false);
   const [errors, setErrors] = useState({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [actionError, setActionError] = useState("");
+  const [matchedAdminCompetition, setMatchedAdminCompetition] = useState(null);
+  const formTitleRef = useRef(null);
   const today = new Date();
   const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 
-  const loadCompetitions = useCallback(async () => {
+  const loadCompetitions = useCallback(async ({ force = false } = {}) => {
     const token = localStorage.getItem("userToken");
     if (!token) return;
-    const res = await fetch(`${API_BASE_URL}/api/external/participations`, {
-      headers: { Authorization: `Bearer ${token}` }
-    }).catch(() => null);
-    if (res && res.ok) {
-      const data = await res.json().catch(() => []);
-      setCompetitions(Array.isArray(data) ? data : []);
+    try {
+      const data = await fetchJsonCached(`${API_BASE_URL}/api/external/participations`, {
+        token,
+        ttlMs: 120000,
+        force,
+        cacheKey: "external:participations:me",
+      });
+      const toTimestamp = (value) => {
+        if (!value) return 0;
+        const parsed = new Date(value).getTime();
+        return Number.isNaN(parsed) ? 0 : parsed;
+      };
+      const raw = Array.isArray(data) ? data : [];
+      const studentCreated = raw.filter((item) => item.source === "student_created" || !item.competitionId);
+      const sorted = studentCreated.sort((a, b) => {
+        const first = b.updatedAt || b.submittedAt || b.createdAt;
+        const second = a.updatedAt || a.submittedAt || a.createdAt;
+        return toTimestamp(first) - toTimestamp(second);
+      });
+      const normalized = sorted.map((item) => ({
+        ...item,
+        status: (() => {
+          const rawStatus = String(item.status || "").toLowerCase();
+          if (!rawStatus) return "pending";
+          return rawStatus;
+        })(),
+        submittedAtLabel: formatDateTimeLabel(item.submittedAt || item.updatedAt || item.createdAt),
+        proofDeadlineDate: item.proofDeadline ? new Date(item.proofDeadline) : null,
+        isDeadlinePassed: item.proofDeadline ? new Date(item.proofDeadline) <= new Date() : false,
+      }));
+      setCompetitions(normalized);
+    } catch {
+      setCompetitions([]);
     }
   }, []);
 
   useEffect(() => {
-    loadCompetitions();
+    loadCompetitions({ force: false });
   }, [loadCompetitions]);
 
   useEffect(() => {
-    const token = localStorage.getItem("userToken");
-    if (!token) return;
-    let es;
-    try {
-      es = new EventSource(`${API_BASE_URL}/api/notifications/stream?token=${token}`);
-      es.addEventListener("notification", (e) => {
-        try {
-          const n = JSON.parse(e.data);
-          const typesToRefresh = new Set(["GENERAL", "REJECTION", "ROLLBACK", "EXTERNAL_PARTICIPATION_SUBMITTED"]);
-          if (n && typesToRefresh.has(n.type)) {
-            loadCompetitions();
-          }
-        } catch {}
-      });
-    } catch {}
+    const handleNotificationsUpdate = () => {
+      loadCompetitions({ force: false });
+    };
+    const handleSubmissionUpdate = () => loadCompetitions({ force: false });
+    const handleCompetitionUpdate = () => loadCompetitions({ force: false });
+    const handleSessionChange = () => loadCompetitions({ force: false });
+    window.addEventListener("notifications:updated", handleNotificationsUpdate);
+    window.addEventListener("submissions:updated", handleSubmissionUpdate);
+    window.addEventListener("competitions:updated", handleCompetitionUpdate);
+    window.addEventListener("session:changed", handleSessionChange);
     return () => {
-      if (es) es.close();
+      window.removeEventListener("notifications:updated", handleNotificationsUpdate);
+      window.removeEventListener("submissions:updated", handleSubmissionUpdate);
+      window.removeEventListener("competitions:updated", handleCompetitionUpdate);
+      window.removeEventListener("session:changed", handleSessionChange);
     };
   }, [loadCompetitions]);
+
+  useEffect(() => {
+    if (
+      (showCreateForm || showEditForm) &&
+      matchedAdminCompetition?.competitionId &&
+      formTitleRef.current
+    ) {
+      formTitleRef.current.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }
+  }, [matchedAdminCompetition?.competitionId, showCreateForm, showEditForm]);
   
   // Form state
   const [formData, setFormData] = useState({
@@ -188,32 +238,32 @@ export default function MyExternalCompetitions() {
     startDate: "",
     endDate: "",
     websiteLink: "",
-    registrationFeeType: "Free",
-    registrationFeeAmount: "",
-    registrationFeeCurrency: "",
-    prizes: "",
     submissionNotes: "",
     sourceConfirmation: "",
-    participationResult: "",
-    proofFiles: [],
   });
 
   const handleInputChange = (field, value) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
+    setFormData((prev) => {
+      if (field === "category") {
+        return {
+          ...prev,
+          category: value,
+          customCategory: value === "Other" ? prev.customCategory : "",
+        };
+      }
+      return { ...prev, [field]: value };
+    });
+    if (["title", "location", "category", "customCategory", "organizer"].includes(field)) {
+      setMatchedAdminCompetition(null);
+    }
     setErrors(prev => ({ ...prev, [field]: undefined }));
-  };
-
-  const handleFileUpload = (e) => {
-    const files = Array.from(e.target.files || []);
-    setProofUploadFiles(prev => [...prev, ...files]);
-    setErrors(prev => ({ ...prev, proofFiles: undefined }));
   };
 
   const validateForm = () => {
     const v = {};
     if (!formData.title) v.title = "Required";
     if (!formData.category) v.category = "Required";
-    if (formData.category === "Other" && !formData.customCategory) v.customCategory = "Required";
+    if (formData.category === "Other" && !String(formData.customCategory || "").trim()) v.customCategory = "Required";
     if (!formData.organizer) v.organizer = "Required";
     if (!formData.mode) v.mode = "Required";
     if (!formData.location) v.location = "Required";
@@ -221,12 +271,12 @@ export default function MyExternalCompetitions() {
     if (!formData.description) v.description = "Required";
     if (!formData.startDate) v.startDate = "Required";
     if (!formData.endDate) v.endDate = "Required";
-    if (formData.startDate && formData.startDate > todayStr) v.startDate = "Must be today or earlier";
-    if (formData.endDate && formData.endDate > todayStr) v.endDate = "Must be today or earlier";
+    if (formData.startDate && formData.startDate < todayStr) v.startDate = "Start date cannot be in the past";
+    if (formData.endDate && formData.endDate < todayStr) v.endDate = "End date cannot be in the past";
     if (!formData.eligibility) v.eligibility = "Required";
     if (!formData.websiteLink) v.websiteLink = "Required";
     if (!formData.participationType) v.participationType = "Required";
-    if (formData.startDate && formData.endDate && formData.endDate < formData.startDate) v.endDate = "End date must be after start date";
+    if (formData.startDate && formData.endDate && formData.endDate < formData.startDate) v.endDate = "End date must be on or after start date";
     
     if (formData.participationType === "Team") {
       const min = formData.teamSizeMin !== "" ? Number(formData.teamSizeMin) : null;
@@ -243,29 +293,227 @@ export default function MyExternalCompetitions() {
       } else if (!Number.isInteger(max) || max < 1) {
         v.teamSizeMax = "Must be at least 1";
       } else if (min !== null && max !== null && min > max) {
-        v.teamSizeMax = "Max must be ≥ Min";
+        v.teamSizeMax = "Max must be >= Min";
       }
     }
     
-    if (!formData.registrationFeeType) v.registrationFeeType = "Required";
-    if (formData.registrationFeeType === "Paid") {
-      const amt = parseFloat(formData.registrationFeeAmount);
-      if (!formData.registrationFeeAmount) {
-        v.registrationFeeAmount = "Required";
-      } else if (!Number.isFinite(amt) || amt <= 0) {
-        v.registrationFeeAmount = "Enter a valid positive number";
-      }
-      if (!formData.registrationFeeCurrency) v.registrationFeeCurrency = "Required";
-    }
-    
-    if (!formData.prizes) v.prizes = "Required";
     if (!formData.submissionNotes) v.submissionNotes = "Required";
     if (!formData.sourceConfirmation) v.sourceConfirmation = "Required";
-    if (!formData.participationResult) v.participationResult = "Required";
     if (!declarationChecked) v.declaration = "Please confirm declaration";
-    if (proofUploadFiles.length === 0 && (formData.proofFiles || []).length === 0) v.proofFiles = "Required";
     
     return v;
+  };
+
+  const uploadProofFiles = async (competitionId, files) => {
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      toast.error("Please sign in again");
+      return false;
+    }
+
+    const competition = competitions.find(c => c.id === competitionId);
+    if (competition?.status !== "confirmed") {
+      toast.error("You can upload proof only after admin confirmation");
+      return false;
+    }
+    if (isBeforeSubmissionStart(competition)) {
+      toast.error(`Cannot upload before competition end date (${getSubmissionStartLabel(competition)}).`);
+      return false;
+    }
+    if (competition?.proofDeadline && new Date(competition.proofDeadline) <= new Date()) {
+      toast.error("Cannot upload: Proof deadline has passed");
+      return false;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const formData = new FormData();
+      files.forEach(file => {
+        formData.append("file", file);
+      });
+
+      const res = await fetch(`${API_BASE_URL}/api/external/participations/${competitionId}/proof`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`
+        },
+        body: formData
+      });
+
+      if (!res.ok) {
+        const error = await res.text().catch(() => "Upload failed");
+        throw new Error(error);
+      }
+
+      await res.json();
+      
+      invalidateApiCache((key) => String(key).includes("/api/external/participations"));
+      window.dispatchEvent(new CustomEvent("submissions:updated"));
+      await loadCompetitions({ force: true });
+      toast.success("Proof uploaded successfully");
+      return true;
+    } catch (err) {
+      toast.error(err?.message || "Upload failed");
+      return false;
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const removeProofFile = async (competitionId, fileUrl) => {
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      toast.error("Please sign in again");
+      return false;
+    }
+
+    const competition = competitions.find(c => c.id === competitionId);
+    if (competition?.status !== "confirmed") {
+      toast.error("You can edit proof only before submitting for admin review");
+      return false;
+    }
+    if (competition?.proofDeadline && new Date(competition.proofDeadline) <= new Date()) {
+      toast.error("Cannot remove: Proof deadline has passed");
+      return false;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/external/participations/${competitionId}/proof?file=${encodeURIComponent(fileUrl)}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (!res.ok) {
+        const error = await res.text().catch(() => "Remove failed");
+        throw new Error(error);
+      }
+
+      invalidateApiCache((key) => String(key).includes("/api/external/participations"));
+      window.dispatchEvent(new CustomEvent("submissions:updated"));
+      await loadCompetitions({ force: true });
+      toast.success("File removed");
+      return true;
+    } catch (err) {
+      toast.error(err?.message || "Remove failed");
+      return false;
+    }
+  };
+
+  const updateParticipationResult = async (competitionId, result) => {
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      toast.error("Please sign in again");
+      return;
+    }
+    const competition = competitions.find(c => c.id === competitionId);
+    if (competition?.status !== "confirmed") {
+      toast.error("You can edit result only after admin confirmation");
+      return;
+    }
+    if (isBeforeSubmissionStart(competition)) {
+      toast.error(`Cannot update result before competition end date (${getSubmissionStartLabel(competition)}).`);
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/external/participations/${competitionId}/result`, {
+        method: "PATCH",
+        headers: { 
+          "Content-Type": "application/json", 
+          Authorization: `Bearer ${token}` 
+        },
+        body: JSON.stringify({ participationResult: result }),
+      });
+
+      if (!res.ok) {
+        const error = await res.text().catch(() => "Update failed");
+        throw new Error(error);
+      }
+
+      invalidateApiCache((key) => String(key).includes("/api/external/participations"));
+      await loadCompetitions({ force: true });
+      toast.success("Level of achievement saved");
+    } catch (err) {
+      toast.error(err?.message || "Failed to save result");
+    }
+  };
+
+  const submitForAdminReview = async (competitionId) => {
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      toast.error("Please sign in again");
+      return false;
+    }
+
+    const competition = competitions.find(c => c.id === competitionId);
+    if (!competition) {
+      toast.error("Competition not found");
+      return false;
+    }
+    if (competition.status !== "confirmed") {
+      toast.error("This competition is not ready for submission");
+      return false;
+    }
+    if (!competition.proofDeadline) {
+      toast.error("Admin has not set proof deadline yet");
+      return false;
+    }
+    if (isBeforeSubmissionStart(competition)) {
+      toast.error(`Cannot submit before competition end date (${getSubmissionStartLabel(competition)}).`);
+      return false;
+    }
+    if (new Date(competition.proofDeadline) <= new Date()) {
+      toast.error("Cannot submit: Proof deadline has passed");
+      return false;
+    }
+    if (!competition.proofFiles || competition.proofFiles.length === 0) {
+      toast.error("Please upload at least one proof file");
+      return false;
+    }
+    if (!competition.participationResult) {
+      toast.error("Please select your achievement before submitting");
+      return false;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/external/participations/${competitionId}/submit-review`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!res.ok) {
+        let message = "Failed to submit for admin review";
+        try {
+          const contentType = res.headers.get("content-type") || "";
+          if (contentType.includes("application/json")) {
+            const data = await res.json();
+            message = data?.message || message;
+          } else {
+            message = await res.text() || message;
+          }
+        } catch {
+          // no-op
+        }
+        throw new Error(message);
+      }
+
+      invalidateApiCache((key) => String(key).includes("/api/external/participations"));
+      window.dispatchEvent(new CustomEvent("submissions:updated"));
+      window.dispatchEvent(new CustomEvent("notifications:updated"));
+      await loadCompetitions({ force: true });
+      toast.success("Submitted for admin review");
+      return true;
+    } catch (err) {
+      toast.error(err?.message || "Failed to submit for admin review");
+      return false;
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleSubmit = async () => {
@@ -292,20 +540,15 @@ export default function MyExternalCompetitions() {
       startDate: formData.startDate || null,
       endDate: formData.endDate || null,
       websiteLink: formData.websiteLink || "",
-      prizes: formData.prizes || "",
-      registrationFeeType: formData.registrationFeeType,
-      registrationFeeAmount: formData.registrationFeeType === "Paid" ? Number(formData.registrationFeeAmount || 0) : null,
-      registrationFeeCurrency: formData.registrationFeeType === "Paid" ? formData.registrationFeeCurrency : null,
       submissionNotes: formData.submissionNotes || "",
       sourceConfirmation: formData.sourceConfirmation || "",
-      declarationConfirmed: true,
-      participationResult: formData.participationResult || "",
-      proofFiles: []
+      declarationConfirmed: true
     };
     try {
       setIsSubmitting(true);
       setActionError("");
-      const res = await fetch("http://localhost:8081/api/external/participations", {
+      setMatchedAdminCompetition(null);
+      const res = await fetch(`${API_BASE_URL}/api/external/participations`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -315,40 +558,49 @@ export default function MyExternalCompetitions() {
       });
       if (!res.ok) {
         let msg = "Submit failed";
+        let matched = null;
         try {
           const ct = res.headers.get("content-type") || "";
           if (ct.includes("application/json")) {
             const data = await res.json();
             msg = data.message || msg;
+            if (res.status === 409 && data?.competitionId) {
+              matched = {
+                competitionId: data.competitionId,
+                title: data.title || "",
+              };
+            }
           } else {
             msg = await res.text() || msg;
           }
         } catch {}
+        if (matched) {
+          setMatchedAdminCompetition(matched);
+          setActionError("");
+          return;
+        }
         setActionError(msg);
         return;
       }
-      const created = await res.json();
-      for (const file of proofUploadFiles) {
-        const fd = new FormData();
-        fd.append("file", file);
-        const upRes = await fetch(`http://localhost:8081/api/external/participations/${created.id}/proof`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: fd
-        }).catch(() => null);
-        if (upRes && !upRes.ok) {
-          setActionError("Some files failed to upload");
-        }
-      }
-      await loadCompetitions();
-    } catch {}
-    finally {
+
+      await res.json();
+      
+      invalidateApiCache((key) => {
+        const value = String(key);
+        return value.includes("/api/external/participations")
+          || value.includes("external:participations:");
+      });
+      window.dispatchEvent(new CustomEvent("submissions:updated"));
+      window.dispatchEvent(new CustomEvent("notifications:updated"));
+      await loadCompetitions({ force: false });
+      toast.success("External competition submitted successfully");
+      setShowCreateForm(false);
+      resetForm();
+    } catch (err) {
+      setActionError(err?.message || "Submit failed");
+    } finally {
       setIsSubmitting(false);
     }
-    setShowCreateForm(false);
-    setSelectedCompetition(null);
-    setProofUploadFiles([]);
-    resetForm();
   };
 
   const handleResubmit = async () => {
@@ -360,6 +612,9 @@ export default function MyExternalCompetitions() {
     const v = {};
     if (!formData.title) v.title = "Required";
     if (!formData.category) v.category = "Required";
+    if (formData.category === "Other" && !String(formData.customCategory || "").trim()) {
+      v.customCategory = "Required";
+    }
     if (!formData.organizer) v.organizer = "Required";
     if (!formData.mode) v.mode = "Required";
     if (!formData.location) v.location = "Required";
@@ -367,30 +622,20 @@ export default function MyExternalCompetitions() {
     if (!formData.description) v.description = "Required";
     if (!formData.startDate) v.startDate = "Required";
     if (!formData.endDate) v.endDate = "Required";
-    if (formData.startDate && formData.startDate > todayStr) v.startDate = "Must be today or earlier";
-    if (formData.endDate && formData.endDate > todayStr) v.endDate = "Must be today or earlier";
-    if (!formData.participationResult) v.participationResult = "Required";
     if (!formData.eligibility) v.eligibility = "Required";
-    if (formData.startDate && formData.endDate && formData.endDate < formData.startDate) v.endDate = "End date must be after start date";
+    if (formData.startDate && formData.endDate && formData.endDate < formData.startDate) v.endDate = "End date must be on or after start date";
     if (formData.participationType === "Team") {
       const min = Number(formData.teamSizeMin || 0);
       const max = Number(formData.teamSizeMax || 0);
       if (!min) v.teamSizeMin = "Required";
       if (!max) v.teamSizeMax = "Required";
-      if (min && max && min > max) v.teamSizeMax = "Max must be ≥ Min";
+      if (min && max && min > max) v.teamSizeMax = "Max must be >= Min";
     }
     if (!formData.websiteLink) v.websiteLink = "Required";
     if (!formData.participationType) v.participationType = "Required";
-    if (!formData.registrationFeeType) v.registrationFeeType = "Required";
-    if (formData.registrationFeeType === "Paid") {
-      const amt = parseFloat(formData.registrationFeeAmount);
-      if (!Number.isFinite(amt) || amt <= 0) v.registrationFeeAmount = "Enter a valid amount";
-      if (!formData.registrationFeeCurrency) v.registrationFeeCurrency = "Required";
-    }
-    if (!formData.prizes) v.prizes = "Required";
     if (!formData.submissionNotes) v.submissionNotes = "Required";
     if (!formData.sourceConfirmation) v.sourceConfirmation = "Required";
-    if (proofUploadFiles.length === 0) v.proofFiles = "Required";
+    
     if (!declarationChecked) v.declaration = "Please confirm declaration";
     setErrors(v);
     if (Object.keys(v).length > 0) return;
@@ -409,20 +654,15 @@ export default function MyExternalCompetitions() {
       startDate: formData.startDate || null,
       endDate: formData.endDate || null,
       websiteLink: formData.websiteLink || "",
-      prizes: formData.prizes || "",
-      registrationFeeType: formData.registrationFeeType,
-      registrationFeeAmount: formData.registrationFeeType === "Paid" ? Number(formData.registrationFeeAmount || 0) : null,
-      registrationFeeCurrency: formData.registrationFeeType === "Paid" ? formData.registrationFeeCurrency : null,
       submissionNotes: formData.submissionNotes || "",
       sourceConfirmation: formData.sourceConfirmation || "",
-      declarationConfirmed: true,
-      participationResult: formData.participationResult || "",
-      proofFiles: []
+      declarationConfirmed: true
     };
     try {
       setIsSubmitting(true);
       setActionError("");
-      const res = await fetch(`http://localhost:8081/api/external/participations/${selectedCompetition.id}`, {
+      setMatchedAdminCompetition(null);
+      const res = await fetch(`${API_BASE_URL}/api/external/participations/${selectedCompetition.id}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -432,39 +672,51 @@ export default function MyExternalCompetitions() {
       });
       if (!res.ok) {
         let msg = "Resubmit failed";
+        let matched = null;
         try {
           const ct = res.headers.get("content-type") || "";
           if (ct.includes("application/json")) {
             const data = await res.json();
             msg = data.message || msg;
+            if (res.status === 409 && data?.competitionId) {
+              matched = {
+                competitionId: data.competitionId,
+                title: data.title || "",
+              };
+            }
           } else {
             msg = await res.text() || msg;
           }
         } catch {}
+        if (matched) {
+          setMatchedAdminCompetition(matched);
+          setActionError("");
+          return;
+        }
         setActionError(msg);
         return;
       }
-      for (const file of proofUploadFiles) {
-        const fd = new FormData();
-        fd.append("file", file);
-        const upRes = await fetch(`http://localhost:8081/api/external/participations/${selectedCompetition.id}/proof`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: fd
-        }).catch(() => null);
-        if (upRes && !upRes.ok) {
-          setActionError("Some files failed to upload");
-        }
-      }
-      await loadCompetitions();
-    } catch {}
-    finally {
+      invalidateApiCache((key) => {
+        const value = String(key);
+        return value.includes("/api/external/participations")
+          || value.includes("external:participations:");
+      });
+      window.dispatchEvent(new CustomEvent("submissions:updated"));
+      window.dispatchEvent(new CustomEvent("notifications:updated"));
+      await loadCompetitions({ force: false });
+      toast.success(
+        selectedCompetition.status === "confirmed"
+          ? "Competition details updated."
+          : "Competition resubmitted successfully",
+      );
+      setShowEditForm(false);
+      setSelectedCompetition(null);
+      resetForm();
+    } catch {
+      toast.error("Resubmit failed");
+    } finally {
       setIsSubmitting(false);
     }
-    setShowEditForm(false);
-    setSelectedCompetition(null);
-    setProofUploadFiles([]);
-    resetForm();
   };
 
   const resetForm = () => {
@@ -484,27 +736,24 @@ export default function MyExternalCompetitions() {
       startDate: "",
       endDate: "",
       websiteLink: "",
-      registrationFeeType: "Free",
-      registrationFeeAmount: "",
-      registrationFeeCurrency: "",
-      prizes: "",
       submissionNotes: "",
       sourceConfirmation: "",
-      participationResult: "",
-      proofFiles: [],
     });
     setDeclarationChecked(false);
-    setProofUploadFiles([]);
     setErrors({});
     setActionError("");
+    setMatchedAdminCompetition(null);
   };
 
   const openEditForm = (competition) => {
+    const rawCategory = String(competition.category || "").trim();
+    const matchedCategoryOption = findKnownCategoryOption(rawCategory);
+    const useCustomCategory = Boolean(rawCategory) && !matchedCategoryOption;
     setSelectedCompetition(competition);
     setFormData({
       title: competition.title,
-      category: competition.category,
-      customCategory: "",
+      category: rawCategory ? (matchedCategoryOption || "Other") : "",
+      customCategory: useCustomCategory ? rawCategory : "",
       organizer: competition.organizer,
       mode: competition.mode,
       location: competition.location,
@@ -517,17 +766,48 @@ export default function MyExternalCompetitions() {
       startDate: competition.startDate,
       endDate: competition.endDate,
       websiteLink: competition.websiteLink || "",
-      registrationFeeType: competition.registrationFeeType || "Free",
-      registrationFeeAmount: competition.registrationFeeAmount || "",
-      registrationFeeCurrency: competition.registrationFeeCurrency || "",
-      prizes: competition.prizes || "",
       submissionNotes: competition.submissionNotes || "",
       sourceConfirmation: competition.sourceConfirmation || "",
-      participationResult: competition.participationResult,
-      proofFiles: competition.proofFiles || [],
     });
+    setDeclarationChecked(competition.declarationConfirmed !== false);
+    setMatchedAdminCompetition(null);
     setShowEditForm(true);
   };
+
+  const handleDelete = async (competitionId) => {
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      toast.error("Please sign in again");
+      return;
+    }
+
+    if (!confirm("Are you sure you want to delete this competition? This action cannot be undone.")) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/external/participations/${competitionId}`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (!res.ok) {
+        const error = await res.text().catch(() => "Delete failed");
+        throw new Error(error);
+      }
+
+      invalidateApiCache((key) => String(key).includes("/api/external/participations"));
+      await loadCompetitions({ force: true });
+      setSelectedCompetition(null);
+      toast.success("Competition deleted");
+    } catch (err) {
+      toast.error(err?.message || "Delete failed");
+    }
+  };
+
+  const legacyHintsEnabled = false;
 
   return (
     <AppLayout role="student">
@@ -554,9 +834,8 @@ export default function MyExternalCompetitions() {
           <div>
             <p className="font-medium text-foreground">How it works</p>
             <p className="text-sm text-muted-foreground">
-              Submit competitions you've participated in outside of the university system. 
-              Admin will verify your proof and approve it. Once approved, it will appear 
-              on the Social Feed as an achievement.
+              First submit your announcement. After admin confirms and sets a proof deadline,
+              upload your files and achievement, then submit for admin review.
             </p>
           </div>
         </div>
@@ -564,8 +843,13 @@ export default function MyExternalCompetitions() {
         {/* Competition List */}
         <div className="grid gap-4">
           {competitions.map((competition) => {
-            const StatusIcon = statusIcons[competition.status];
+            const StatusIcon = statusIcons[competition.status] || Clock;
             const canEdit = competition.status === "rejected";
+            const needsResubmission =
+              competition.status === "confirmed" && Boolean(competition.adminNote);
+            const deadlinePassed = competition.proofDeadline && new Date(competition.proofDeadline) <= new Date();
+            const beforeSubmissionStart = isBeforeSubmissionStart(competition);
+            const submissionStartLabel = getSubmissionStartLabel(competition);
             
             return (
               <div key={competition.id} className="card-elevated p-6">
@@ -585,6 +869,20 @@ export default function MyExternalCompetitions() {
                       </span>
                     </div>
                     
+                    {competition.duplicateWithAdmin || competition.matchedAdminCompetitionId ? (
+                      <div className="mt-2 flex items-center gap-3">
+                        <div className="p-2 rounded-md bg-info/10 text-info text-sm">
+                          Your created external competition is the same as Admin's.
+                        </div>
+                        {competition.matchedAdminCompetitionId ? (
+                          <Link to={`/competitions/${competition.matchedAdminCompetitionId}`} className="text-secondary hover:underline text-sm flex items-center gap-1">
+                            <ExternalLink className="w-3 h-3" />
+                            View Admin Competition
+                          </Link>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    
                     <h3 className="font-display font-semibold text-lg text-foreground mb-1">
                       {competition.title}
                     </h3>
@@ -599,33 +897,242 @@ export default function MyExternalCompetitions() {
                       </span>
                       <span className="flex items-center gap-1.5">
                         <Calendar className="w-4 h-4" />
-                        {competition.startDate} - {competition.endDate}
+                        {formatDateLabel(competition.startDate)} - {formatDateLabel(competition.endDate)}
                       </span>
                       <span className="flex items-center gap-1.5">
                         <MapPin className="w-4 h-4" />
                         {competition.location}
                       </span>
-                      <span className="flex items-center gap-1.5">
-                        <Award className="w-4 h-4 text-achievement" />
-                        {competition.participationResult}
-                      </span>
                     </div>
 
-                    {competition.adminNote && (
+                    {competition.adminNote &&
+                      (competition.status === "rejected" ||
+                        competition.status === "approved" ||
+                        competition.status === "confirmed") && (
                       <div className={cn(
                         "mt-3 p-3 rounded-lg text-sm",
-                        competition.status === "approved" ? "bg-success/10 text-success" : "bg-destructive/10 text-destructive"
+                        competition.status === "approved"
+                          ? "bg-success/10 text-success"
+                          : needsResubmission || competition.status === "rejected"
+                            ? "bg-destructive/10 text-destructive"
+                            : "bg-destructive/10 text-destructive"
                       )}>
-                        <strong>Admin Note:</strong> {competition.adminNote}
+                        <strong>{needsResubmission ? "Submission Rejected:" : "Admin Note:"}</strong> {competition.adminNote}
+                        {needsResubmission && (
+                          <span> Please update your proof and submit again before the deadline.</span>
+                        )}
                       </div>
                     )}
 
                     <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-                      <FileText className="w-3 h-3" />
-                      <span>{competition.proofFiles?.length || 0} file(s) attached</span>
-                      <span>•</span>
-                      <span>Submitted: {competition.submittedAt}</span>
+                      <span>Submitted: {competition.submittedAtLabel || "-"}</span>
                     </div>
+
+                    {competition.status === "pending" && !competition.proofDeadline && (
+                      <div className="mt-3 p-2 bg-warning/5 border border-warning/20 rounded text-xs text-warning">
+                        Waiting for admin confirmation.
+                      </div>
+                    )}
+
+                    {competition.status === "pending" && competition.proofDeadline && (
+                      <div className="mt-3 p-2 bg-info/5 border border-info/20 rounded text-xs text-info">
+                        Your proof submission is pending admin review.
+                      </div>
+                    )}
+                    
+                    {/* Proof Submission Section */}
+                    {competition.status === "confirmed" && competition.proofDeadline && (
+                      <div className="mt-3 p-4 rounded-lg bg-info/10 border border-info/20 space-y-3">
+                        {needsResubmission && (
+                          <div className="p-2 bg-destructive/10 border border-destructive/20 rounded text-xs text-destructive">
+                            Admin rejected your previous submission. Please resubmit your achievement and proof files.
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center gap-2">
+                            <Clock className="w-4 h-4 text-info" />
+                            <span className="text-sm font-medium">
+                              Proof Deadline: {formatDateTimeLabel(competition.proofDeadline)}
+                            </span>
+                          </div>
+                          {deadlinePassed ? (
+                            <Badge variant="outline" className="bg-warning/10 text-warning border-warning/20">
+                              Deadline Passed
+                            </Badge>
+                          ) : beforeSubmissionStart ? (
+                            <Badge variant="outline" className="bg-info/10 text-info border-info/20">
+                              Opens on {submissionStartLabel}
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="bg-success/10 text-success border-success/20">
+                              Submission Open
+                            </Badge>
+                          )}
+                        </div>
+
+                        {/* Achievement Level Selection */}
+                        <div className="flex items-center gap-3">
+                          <label className="text-sm text-muted-foreground">Your Achievement:</label>
+                          <select
+                            value={competition.participationResult || ""}
+                            onChange={(e) => updateParticipationResult(competition.id, e.target.value)}
+                            disabled={deadlinePassed || beforeSubmissionStart}
+                            className="h-8 px-2 rounded border border-border bg-background text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <option value="">Select level</option>
+                            {[
+                              "Winner",
+                              "1st Runner Up",
+                              "2nd Runner Up",
+                              "3rd Place",
+                              "Top 5",
+                              "Top 10",
+                              "Finalist",
+                              "Participant"
+                            ].map(opt => (
+                              <option key={opt} value={opt}>{opt}</option>
+                            ))}
+                          </select>
+                          {beforeSubmissionStart ? (
+                            <span className="text-xs text-info">Available on {submissionStartLabel}</span>
+                          ) : deadlinePassed && (
+                            <span className="text-xs text-warning">Cannot change after deadline</span>
+                          )}
+                        </div>
+
+                        {/* File Upload */}
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="file"
+                              id={`proof-upload-${competition.id}`}
+                              multiple
+                              accept=".png,.jpg,.jpeg,.pdf"
+                              onChange={async (e) => {
+                                const files = Array.from(e.target.files || []);
+                                if (files.length > 0) {
+                                  await uploadProofFiles(competition.id, files);
+                                }
+                                e.target.value = "";
+                              }}
+                              className="hidden"
+                              disabled={deadlinePassed || beforeSubmissionStart}
+                            />
+                            <Button 
+                              size="sm"
+                              variant={deadlinePassed || beforeSubmissionStart ? "outline" : "default"}
+                              onClick={() => {
+                                if (!deadlinePassed && !beforeSubmissionStart) {
+                                  document.getElementById(`proof-upload-${competition.id}`)?.click();
+                                } else if (beforeSubmissionStart) {
+                                  toast.error(`Submission opens on ${submissionStartLabel}`);
+                                } else {
+                                  toast.error("Cannot upload: Proof deadline has passed");
+                                }
+                              }}
+                              className="gap-2"
+                              disabled={deadlinePassed || beforeSubmissionStart || isSubmitting}
+                            >
+                              <Upload className="w-4 h-4" />
+                              {beforeSubmissionStart
+                                ? `Opens on ${submissionStartLabel}`
+                                : deadlinePassed
+                                  ? "Deadline Passed"
+                                  : "Upload Proof Files"}
+                            </Button>
+                            {isSubmitting && <span className="text-sm text-muted-foreground">Uploading...</span>}
+                          </div>
+
+                          {/* Display uploaded files */}
+                          {(competition.proofFiles || []).length > 0 && (
+                            <div className="mt-2">
+                              <p className="text-xs text-muted-foreground mb-2">
+                                Uploaded Files ({competition.proofFiles.length}):
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                {competition.proofFiles.map((file, idx) => {
+                                  const fullUrl = resolveFileUrl(file || "");
+                                  const fileName = extractDisplayFileName(file, `File ${idx + 1}`);
+                                  return (
+                                    <div key={idx} className="flex items-center gap-1 bg-background rounded border p-1 pr-2">
+                                      <a 
+                                        href={fullUrl} 
+                                        target="_blank" 
+                                        rel="noopener noreferrer"
+                                        className="flex items-center gap-1 text-xs hover:text-secondary"
+                                      >
+                                        <FileText className="w-3 h-3" />
+                                        <span className="max-w-[150px] truncate">{fileName}</span>
+                                      </a>
+                                      {!deadlinePassed && !beforeSubmissionStart && (
+                                        <button
+                                          onClick={() => removeProofFile(competition.id, file)}
+                                          className="text-muted-foreground hover:text-destructive ml-1"
+                                          title="Remove file"
+                                        >
+                                          <X className="w-3 h-3" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between gap-3 flex-wrap pt-2 border-t border-info/20">
+                          <span className="text-xs text-muted-foreground">
+                            Submit once all proof files and achievement are complete.
+                          </span>
+                          <Button
+                            size="sm"
+                            onClick={() => submitForAdminReview(competition.id)}
+                            disabled={
+                              isSubmitting ||
+                              deadlinePassed ||
+                              beforeSubmissionStart ||
+                              !competition.participationResult ||
+                              !competition.proofFiles?.length
+                            }
+                          >
+                            Submit for Admin Review
+                          </Button>
+                        </div>
+
+                        {/* Status Message */}
+                        {beforeSubmissionStart && (
+                          <div className="p-2 bg-info/5 border border-info/20 rounded text-xs text-info">
+                            Proof submission opens on the competition end date: {submissionStartLabel}.
+                          </div>
+                        )}
+                        {!beforeSubmissionStart && !deadlinePassed && competition.proofFiles?.length === 0 && (
+                          <div className="p-2 bg-info/5 border border-info/20 rounded text-xs text-info">
+                            Upload your proof files before the deadline. You can upload multiple files.
+                          </div>
+                        )}
+                        {!beforeSubmissionStart && !deadlinePassed && competition.proofFiles?.length > 0 && !competition.participationResult && (
+                          <div className="p-2 bg-warning/5 border border-warning/20 rounded text-xs text-warning">
+                            Select your achievement before submitting for review.
+                          </div>
+                        )}
+                        {deadlinePassed && (
+                          <div className="p-2 bg-warning/5 border border-warning/20 rounded text-xs text-warning">
+                            Deadline passed. Editing is closed.
+                          </div>
+                        )}
+                        {legacyHintsEnabled && deadlinePassed && competition.proofFiles?.length > 0 && (
+                          <div className="p-2 bg-warning/5 border border-warning/20 rounded text-xs text-warning">
+                            ⏳ Deadline passed. Your proof is now with admin for review.
+                          </div>
+                        )}
+                        {legacyHintsEnabled && !deadlinePassed && competition.proofFiles?.length === 0 && (
+                          <div className="p-2 bg-info/5 border border-info/20 rounded text-xs text-info">
+                            ℹ️ Upload your proof files before the deadline. You can upload multiple files.
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex gap-2 flex-shrink-0">
@@ -639,14 +1146,27 @@ export default function MyExternalCompetitions() {
                       View Details
                     </Button>
                     {canEdit && (
-                      <Button 
-                        size="sm" 
-                        className="gap-1"
-                        onClick={() => openEditForm(competition)}
-                      >
-                        <Edit3 className="w-4 h-4" />
-                        Edit & Resubmit
-                      </Button>
+                      <>
+                        <Button 
+                          size="sm" 
+                          className="gap-1"
+                          onClick={() => openEditForm(competition)}
+                        >
+                          <Edit3 className="w-4 h-4" />
+                          Edit & Resubmit
+                        </Button>
+                        {competition.status === "rejected" && (
+                          <Button 
+                            variant="destructive"
+                            size="sm" 
+                            className="gap-1"
+                            onClick={() => handleDelete(competition.id)}
+                          >
+                            <X className="w-4 h-4" />
+                            Delete
+                          </Button>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -671,8 +1191,12 @@ export default function MyExternalCompetitions() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 backdrop-blur-sm overflow-y-auto py-8">
           <div className="card-static w-full max-w-2xl p-6 m-4 animate-fade-in max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-6">
-              <h2 className="font-display font-semibold text-xl">
-                {showEditForm ? "Edit & Resubmit Competition" : "Add External Competition"}
+              <h2 ref={formTitleRef} className="font-display font-semibold text-xl">
+                {showEditForm
+                  ? selectedCompetition?.status === "confirmed"
+                    ? "Edit Competition Details"
+                    : "Edit & Resubmit Competition"
+                  : "Add External Competition"}
               </h2>
               <Button 
                 variant="ghost" 
@@ -692,6 +1216,20 @@ export default function MyExternalCompetitions() {
               {actionError && (
                 <div className="p-3 rounded-lg text-sm bg-destructive/10 text-destructive">
                   {actionError}
+                </div>
+              )}
+              {matchedAdminCompetition?.competitionId && (
+                <div className="p-3 rounded-lg text-sm bg-info/10 border border-info/20 text-info space-y-2">
+                  <p>
+                    This competition already exists in Admin competitions. You do not need to create it here, and no admin confirmation is required.
+                  </p>
+                  <Link
+                    to={`/competitions/${matchedAdminCompetition.competitionId}`}
+                    className="inline-flex items-center gap-1 text-secondary hover:underline font-medium"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    View Admin Competition
+                  </Link>
                 </div>
               )}
               {/* Title */}
@@ -726,6 +1264,20 @@ export default function MyExternalCompetitions() {
                     ))}
                   </select>
                   {errors.category && <div className="mt-1 text-xs text-destructive">{errors.category}</div>}
+                  {formData.category === "Other" && (
+                    <div className="mt-2">
+                      <input
+                        type="text"
+                        value={formData.customCategory}
+                        onChange={(e) => handleInputChange("customCategory", e.target.value)}
+                        placeholder="Type your category"
+                        className="w-full h-10 px-3 rounded-lg bg-muted/50 border border-border text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                      />
+                      {errors.customCategory && (
+                        <div className="mt-1 text-xs text-destructive">{errors.customCategory}</div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <label className="text-sm font-medium text-foreground mb-1.5 block">
@@ -778,8 +1330,6 @@ export default function MyExternalCompetitions() {
                 </div>
               </div>
               
-              
-
               {/* Location */}
               <div>
                 <label className="text-sm font-medium text-foreground mb-1.5 block">
@@ -805,7 +1355,7 @@ export default function MyExternalCompetitions() {
                     type="date"
                     value={formData.startDate}
                     onChange={(e) => handleInputChange("startDate", e.target.value)}
-                    max={todayStr}
+                    min={showEditForm ? undefined : todayStr}
                     className="w-full h-10 px-3 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                   {errors.startDate && <div className="mt-1 text-xs text-destructive">{errors.startDate}</div>}
@@ -818,7 +1368,11 @@ export default function MyExternalCompetitions() {
                     type="date"
                     value={formData.endDate}
                     onChange={(e) => handleInputChange("endDate", e.target.value)}
-                    max={todayStr}
+                    min={
+                      showEditForm
+                        ? (formData.startDate || undefined)
+                        : (formData.startDate || todayStr)
+                    }
                     className="w-full h-10 px-3 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                   {errors.endDate && <div className="mt-1 text-xs text-destructive">{errors.endDate}</div>}
@@ -918,76 +1472,6 @@ export default function MyExternalCompetitions() {
                 </div>
               )}
               
-              {/* Registration Fee */}
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-sm font-medium text-foreground mb-1.5 block">
-                    Registration Fee *
-                  </label>
-                  <select
-                    value={formData.registrationFeeType}
-                    onChange={(e) => handleInputChange("registrationFeeType", e.target.value)}
-                    className="w-full h-10 px-3 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                  >
-                    <option value="Free">Free</option>
-                    <option value="Paid">Paid</option>
-                  </select>
-                  {errors.registrationFeeType && <div className="mt-1 text-xs text-destructive">{errors.registrationFeeType}</div>}
-                </div>
-                {formData.registrationFeeType === "Paid" && (
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-sm font-medium text-foreground mb-1.5 block">
-                        Amount *
-                      </label>
-                      <input
-                        type="number"
-                        min="0"
-                        step="any"
-                        value={formData.registrationFeeAmount}
-                        onChange={(e) => handleInputChange("registrationFeeAmount", e.target.value)}
-                        className="w-full h-10 px-3 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                      {errors.registrationFeeAmount && <div className="mt-1 text-xs text-destructive">{errors.registrationFeeAmount}</div>}
-                    </div>
-                    <div>
-                      <label className="text-sm font-medium text-foreground mb-1.5 block">
-                        Currency *
-                      </label>
-                      <select
-                        value={formData.registrationFeeCurrency}
-                        onChange={(e) => handleInputChange("registrationFeeCurrency", e.target.value)}
-                        className="w-full h-10 px-3 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                      >
-                        <option value="">Select currency</option>
-                        <option value="USD">USD</option>
-                        <option value="EUR">EUR</option>
-                        <option value="MMK">MMK</option>
-                        <option value="GBP">GBP</option>
-                        <option value="SGD">SGD</option>
-                        <option value="JPY">JPY</option>
-                      </select>
-                      {errors.registrationFeeCurrency && <div className="mt-1 text-xs text-destructive">{errors.registrationFeeCurrency}</div>}
-                    </div>
-                  </div>
-                )}
-              </div>
-              
-              {/* Prizes */}
-              <div>
-                <label className="text-sm font-medium text-foreground mb-1.5 block">
-                  Prizes/Rewards *
-                </label>
-                <input
-                  type="text"
-                  value={formData.prizes}
-                  onChange={(e) => handleInputChange("prizes", e.target.value)}
-                  placeholder="e.g., Cash prizes, certificates, sponsorship"
-                  className="w-full h-10 px-3 rounded-lg bg-muted/50 border border-border text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                />
-                {errors.prizes && <div className="mt-1 text-xs text-destructive">{errors.prizes}</div>}
-              </div>
-              
               {/* Submission Notes */}
               <div>
                 <label className="text-sm font-medium text-foreground mb-1.5 block">
@@ -1020,69 +1504,6 @@ export default function MyExternalCompetitions() {
                 {errors.sourceConfirmation && <div className="mt-1 text-xs text-destructive">{errors.sourceConfirmation}</div>}
               </div>
               
-              {/* Participation Result */}
-              <div>
-                <label className="text-sm font-medium text-foreground mb-1.5 block">
-                  Participation Result *
-                </label>
-                <select
-                  value={formData.participationResult}
-                  onChange={(e) => handleInputChange("participationResult", e.target.value)}
-                  className="w-full h-10 px-3 rounded-lg bg-muted/50 border border-border text-sm focus:outline-none focus:ring-2 focus:ring-ring"
-                >
-                  <option value="">Select result</option>
-                  {participationResultOptions.map(result => (
-                    <option key={result} value={result}>{result}</option>
-                  ))}
-                </select>
-                {errors.participationResult && <div className="mt-1 text-xs text-destructive">{errors.participationResult}</div>}
-              </div>
-
-              {/* Proof Files */}
-              <div>
-                <label className="text-sm font-medium text-foreground mb-1.5 block">
-                  Proof Files (Certificate, Photos, etc.) *
-                </label>
-                <div className="border-2 border-dashed border-border rounded-lg p-4 text-center">
-                  <input
-                    type="file"
-                    multiple
-                    accept=".pdf,.png,.jpg,.jpeg,.doc,.docx"
-                    onChange={handleFileUpload}
-                    className="hidden"
-                    id="proof-upload"
-                  />
-                  <label htmlFor="proof-upload" className="cursor-pointer">
-                    <Upload className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
-                    <p className="text-sm text-muted-foreground">
-                      Click to upload or drag and drop
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      PDF, PNG, JPG, DOC (max 10MB each)
-                    </p>
-                  </label>
-                </div>
-                {proofUploadFiles.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {proofUploadFiles.map((file, index) => (
-                      <span 
-                        key={index} 
-                        className="badge-status bg-muted text-muted-foreground flex items-center gap-1"
-                      >
-                        <FileText className="w-3 h-3" />
-                        {file.name || "file"}
-                        <button 
-                          onClick={() => setProofUploadFiles(prev => prev.filter((_, i) => i !== index))}
-                          className="ml-1 hover:text-destructive"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {errors.proofFiles && <div className="mt-1 text-xs text-destructive">{errors.proofFiles}</div>}
-              </div>
             </div>
 
             <div className="mt-6 pt-4 border-t border-border">
@@ -1114,7 +1535,11 @@ export default function MyExternalCompetitions() {
                 onClick={showEditForm ? handleResubmit : handleSubmit}
                 disabled={isSubmitting}
               >
-                {showEditForm ? "Resubmit for Approval" : "Submit for Approval"}
+                {showEditForm
+                  ? selectedCompetition?.status === "confirmed"
+                    ? "Save Details"
+                    : "Resubmit for Approval"
+                  : "Submit for Approval"}
               </Button>
             </div>
           </div>
@@ -1168,11 +1593,9 @@ export default function MyExternalCompetitions() {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Dates</span>
-                  <span className="font-medium">{selectedCompetition.startDate} - {selectedCompetition.endDate}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Result</span>
-                  <span className="font-medium text-achievement">{selectedCompetition.participationResult}</span>
+                  <span className="font-medium">
+                    {formatDateLabel(selectedCompetition.startDate)} - {formatDateLabel(selectedCompetition.endDate)}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Eligibility</span>
@@ -1194,20 +1617,7 @@ export default function MyExternalCompetitions() {
                     </div>
                   </>
                 )}
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Registration Fee</span>
-                  <span className="font-medium">{selectedCompetition.registrationFeeType || "-"}</span>
-                </div>
-                {selectedCompetition.registrationFeeType === "Paid" && (
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Amount</span>
-                    <span className="font-medium">{selectedCompetition.registrationFeeAmount ?? "-"}</span>
-                  </div>
-                )}
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Prizes/Rewards</span>
-                  <span className="font-medium">{selectedCompetition.prizes || "-"}</span>
-                </div>
+                
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Source Confirmation</span>
                   <span className="font-medium">{selectedCompetition.sourceConfirmation || "-"}</span>
@@ -1235,42 +1645,73 @@ export default function MyExternalCompetitions() {
                 </a>
               )}
 
-              <div>
-                <span className="text-sm text-muted-foreground">Proof Files</span>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {selectedCompetition.proofFiles?.map((file, index) => {
-                    const full = resolveFileUrl(file || "");
-                    const ext = full.split(".").pop()?.toLowerCase();
-                    const isImage = ["png","jpg","jpeg","gif","webp"].includes(ext || "");
-                    return (
-                      <a
-                        key={index}
-                        href={full}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-2"
-                      >
-                        {isImage ? (
-                          <img src={full} alt="proof" className="w-16 h-16 object-cover rounded border" />
-                        ) : (
-                          <span className="badge-status bg-muted text-muted-foreground flex items-center gap-1">
-                            <FileText className="w-3 h-3" />
-                            {full.split("/").pop()}
-                          </span>
-                        )}
-                      </a>
-                    );
-                  })}
+              {/* Proof Deadline Display */}
+              {selectedCompetition.proofDeadline && (
+                <div className="p-3 rounded-lg bg-info/10 border border-info/20">
+                  <p className="text-sm font-medium">Proof Deadline</p>
+                  <p className="text-sm">{formatDateTimeLabel(selectedCompetition.proofDeadline)}</p>
+                  {selectedCompetition.isDeadlinePassed ? (
+                    <Badge variant="outline" className="mt-2 bg-warning/10 text-warning border-warning/20">
+                      Deadline Passed
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="mt-2 bg-success/10 text-success border-success/20">
+                      Submission Open
+                    </Badge>
+                  )}
                 </div>
-              </div>
+              )}
 
-              {selectedCompetition.adminNote && (
+              {/* Proof Files Display */}
+              {selectedCompetition.proofFiles?.length > 0 && (
+                <div>
+                  <span className="text-sm text-muted-foreground">Proof Files</span>
+                  <div className="mt-2 space-y-2">
+                    {selectedCompetition.proofFiles.map((file, idx) => {
+                      const fullUrl = resolveFileUrl(file || "");
+                      const fileName = extractDisplayFileName(file, `File ${idx + 1}`);
+                      return (
+                        <div key={idx} className="flex items-center gap-2 p-2 bg-muted/30 rounded">
+                          <FileText className="w-4 h-4 text-secondary" />
+                          <a 
+                            href={fullUrl} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="text-sm hover:text-secondary truncate flex-1"
+                          >
+                            {fileName}
+                          </a>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {selectedCompetition.adminNote &&
+                (selectedCompetition.status === "rejected" ||
+                  selectedCompetition.status === "approved" ||
+                  selectedCompetition.status === "confirmed") && (
+                (() => {
+                  const needsResubmission =
+                    selectedCompetition.status === "confirmed" &&
+                    Boolean(selectedCompetition.adminNote);
+                  return (
                 <div className={cn(
                   "p-3 rounded-lg text-sm",
-                  selectedCompetition.status === "approved" ? "bg-success/10" : "bg-destructive/10"
+                  selectedCompetition.status === "approved"
+                    ? "bg-success/10 text-success"
+                    : needsResubmission || selectedCompetition.status === "rejected"
+                      ? "bg-destructive/10 text-destructive"
+                      : "bg-info/10 text-info"
                 )}>
-                  <strong>Admin Note:</strong> {selectedCompetition.adminNote}
+                  <strong>{needsResubmission ? "Submission Rejected:" : "Admin Note:"}</strong> {selectedCompetition.adminNote}
+                  {needsResubmission && (
+                    <span> Please update your proof and submit again before the deadline.</span>
+                  )}
                 </div>
+                  );
+                })()
               )}
             </div>
 
@@ -1279,9 +1720,17 @@ export default function MyExternalCompetitions() {
                 Close
               </Button>
               {selectedCompetition.status === "rejected" && (
-                <Button onClick={() => openEditForm(selectedCompetition)}>
-                  Edit & Resubmit
-                </Button>
+                <div className="flex gap-2">
+                  <Button onClick={() => openEditForm(selectedCompetition)}>
+                    Edit & Resubmit
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    onClick={() => handleDelete(selectedCompetition.id)}
+                  >
+                    Delete
+                  </Button>
+                </div>
               )}
             </div>
           </div>

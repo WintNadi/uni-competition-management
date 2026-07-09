@@ -1,127 +1,52 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { 
-  ArrowLeft, Trophy, Users, Calendar, FileText, Edit, 
-  CheckCircle, Clock, Eye, BarChart3, Upload, Send
+import {
+  ArrowLeft, Trophy, Users, Calendar, FileText, Edit,
+  CheckCircle, Clock, Eye, BarChart3, Upload, Send, Trash2
 } from "lucide-react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
+import { API_BASE_URL, fetchJsonCached, invalidateApiCache, resolveFileUrl } from "@/lib/api";
 
-const mockCompetitions = {
-  1: {
-    id: 1,
-    title: "AI Innovation Challenge",
-    description: "Build innovative AI solutions for real-world problems. This competition challenges participants to create AI-powered applications that address pressing societal issues.",
-    format: "project",
-    participationType: "team",
-    status: "published",
-    participants: 234,
-    teams: 45,
-    registrationOpen: "Feb 1, 2024",
-    registrationClose: "Feb 28, 2024",
-    submissionDeadline: "Mar 15, 2024",
-    totalMarks: 100,
-    pendingSubmissions: 12,
-    evaluatedSubmissions: 33,
-    rules: [
-      "Teams must consist of 2-5 members",
-      "All code must be original work",
-      "Use of external APIs is allowed",
-      "Documentation must be provided",
-    ],
-  },
-  2: {
-    id: 2,
-    title: "Web Development Quiz",
-    description: "Test your web development knowledge with this comprehensive quiz covering HTML, CSS, JavaScript, and modern frameworks.",
-    format: "quiz",
-    participationType: "individual",
-    status: "draft",
-    participants: 0,
-    teams: null,
-    registrationOpen: "Mar 1, 2024",
-    registrationClose: "Mar 15, 2024",
-    submissionDeadline: "Mar 20, 2024",
-    questions: 25,
-    totalMarks: 50,
-    pendingSubmissions: 0,
-    evaluatedSubmissions: 0,
-    rules: [
-      "60 minutes time limit",
-      "No external resources allowed",
-      "Each question carries equal marks",
-    ],
-  },
-  3: {
-    id: 3,
-    title: "Mobile App Challenge",
-    description: "Create mobile apps that solve community problems using React Native or Flutter.",
-    format: "project",
-    participationType: "team",
-    status: "published",
-    participants: 178,
-    teams: 38,
-    registrationOpen: "Feb 15, 2024",
-    registrationClose: "Mar 10, 2024",
-    submissionDeadline: "Apr 10, 2024",
-    totalMarks: 100,
-    pendingSubmissions: 8,
-    evaluatedSubmissions: 30,
-    rules: [
-      "Must use React Native or Flutter",
-      "App must be functional on both iOS and Android",
-      "Include user documentation",
-    ],
-  },
-  4: {
-    id: 4,
-    title: "Database Design Assignment",
-    description: "Design efficient database schemas for given business scenarios.",
-    format: "assignment",
-    participationType: "individual",
-    status: "published",
-    participants: 156,
-    teams: null,
-    registrationOpen: "Mar 1, 2024",
-    registrationClose: "Mar 10, 2024",
-    submissionDeadline: "Mar 25, 2024",
-    totalMarks: 40,
-    pendingSubmissions: 23,
-    evaluatedSubmissions: 89,
-    rules: [
-      "Use MySQL or PostgreSQL",
-      "Include ER diagrams",
-      "Normalize to 3NF",
-    ],
-  },
-  5: {
-    id: 5,
-    title: "Programming Fundamentals Quiz",
-    description: "Basic programming concepts assessment covering variables, loops, functions, and data structures.",
-    format: "quiz",
-    participationType: "individual",
-    status: "closed",
-    participants: 320,
-    teams: null,
-    registrationOpen: "Feb 1, 2024",
-    registrationClose: "Feb 20, 2024",
-    submissionDeadline: "Feb 28, 2024",
-    questions: 30,
-    totalMarks: 60,
-    pendingSubmissions: 0,
-    evaluatedSubmissions: 320,
-    rules: [
-      "45 minutes time limit",
-      "Multiple choice and coding questions",
-    ],
-  },
+const mapFormatFromBackend = (format) => {
+  if (!format) return "project";
+  // Backend serializes CompetitionFormat as lowercase strings via @JsonProperty
+  switch (String(format).toLowerCase()) {
+    case "quiz":
+      return "quiz";
+    case "assignment":
+      return "assignment";
+    case "project":
+      return "project";
+    default:
+      return "project";
+  }
+};
+
+const mapParticipationFromBackend = (type) => {
+  if (!type) return "individual";
+  switch (type) {
+    case "INDIVIDUAL":
+      return "individual";
+    case "TEAM":
+      return "team";
+    default:
+      return "individual";
+  }
+};
+
+// Keep status handling consistent with TeacherCompetitions
+const mapStatusFromBackend = (status) => {
+  if (!status) return "DRAFT";
+  return String(status).toUpperCase();
 };
 
 const statusStyles = {
-  published: { bg: "bg-success/10", text: "text-success", label: "Published" },
-  draft: { bg: "bg-warning/10", text: "text-warning", label: "Draft" },
-  closed: { bg: "bg-muted", text: "text-muted-foreground", label: "Closed" },
+  PUBLISHED: { bg: "bg-success/10", text: "text-success", label: "Published" },
+  DRAFT: { bg: "bg-warning/10", text: "text-warning", label: "Draft" },
+  CLOSED: { bg: "bg-muted", text: "text-muted-foreground", label: "Closed" },
 };
 
 const formatStyles = {
@@ -130,10 +55,110 @@ const formatStyles = {
   project: { bg: "bg-achievement/10", text: "text-achievement", label: "Project" },
 };
 
+const canEditCompetition = (competition) => {
+  if (!competition?.registrationCloseAt) return true;
+  const closeAt = new Date(competition.registrationCloseAt);
+  if (Number.isNaN(closeAt.getTime())) return true;
+  return new Date() < closeAt;
+};
+
+const canPublishCompetition = (competition) =>
+  competition?.status === "DRAFT" && canEditCompetition(competition);
+
+const canDeleteCompetition = (competition) => {
+  if (!competition?.submissionDeadlineAt) return false;
+  const deadline = new Date(competition.submissionDeadlineAt);
+  if (Number.isNaN(deadline.getTime())) return false;
+  return new Date() >= deadline;
+};
+
 export default function TeacherCompetitionDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const competition = mockCompetitions[id];
+  const [competition, setCompetition] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+    const load = async (force = false) => {
+      try {
+        const data = await fetchJsonCached(`${API_BASE_URL}/api/competitions/${id}`, {
+          token,
+          ttlMs: 120000,
+          force,
+          cacheKey: `teacher:competition:detail:${id}`,
+        });
+
+        const mappedRules = Array.isArray(data.rules)
+          ? data.rules
+          : (typeof data.rules === "string" && data.rules.trim().length > 0
+            ? data.rules.split("\n").map(r => r.trim()).filter(Boolean)
+            : []);
+
+        const mapped = {
+          id: data.competitionId || data.id || id,
+          title: data.title,
+          description: data.description,
+          format: mapFormatFromBackend(data.format),
+          participationType: mapParticipationFromBackend(data.participationType),
+          status: mapStatusFromBackend(data.status),
+          registrationOpen: data.registrationOpen ? new Date(data.registrationOpen).toLocaleString() : "-",
+          registrationClose: data.registrationClose ? new Date(data.registrationClose).toLocaleString() : "-",
+          registrationCloseAt: data.registrationClose || data.registrationDeadline || null,
+          submissionDeadline: data.submissionDeadline ? new Date(data.submissionDeadline).toLocaleString() : "-",
+          submissionDeadlineAt: data.submissionDeadline || null,
+          totalMarks: data.totalMarks ?? 0,
+          rules: mappedRules,
+          participants: 0,
+          teams: null,
+          pendingSubmissions: 0,
+          evaluatedSubmissions: 0,
+          materialsFiles: (() => {
+            const names = Array.isArray(data.materialsFileNames)
+              ? data.materialsFileNames
+              : data.materialsFileName
+                ? [data.materialsFileName]
+                : [];
+            const paths = Array.isArray(data.materialsFilePaths)
+              ? data.materialsFilePaths
+              : data.materialsFilePath
+                ? [data.materialsFilePath]
+                : [];
+            return names.map((name, idx) => ({
+              name: name || `Material ${idx + 1}`,
+              path: paths[idx] || null,
+            }));
+          })(),
+        };
+        setCompetition(mapped);
+      } catch (e) {
+        toast.error("Unable to load competition");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    load(false);
+    const handleCompetitionUpdate = () => load(false);
+    window.addEventListener("competitions:updated", handleCompetitionUpdate);
+    return () => {
+      window.removeEventListener("competitions:updated", handleCompetitionUpdate);
+    };
+  }, [id]);
+
+  if (loading) {
+    return (
+      <AppLayout role="teacher">
+        <div className="text-center py-12">
+          <p className="text-muted-foreground">Loading competition...</p>
+        </div>
+      </AppLayout>
+    );
+  }
 
   if (!competition) {
     return (
@@ -149,11 +174,112 @@ export default function TeacherCompetitionDetail() {
     );
   }
 
-  const handlePublish = () => {
-    // Mock publish action
-    alert("Competition published successfully!");
+  const editable = canEditCompetition(competition);
+  const publishable = canPublishCompetition(competition);
+  const deletable = canDeleteCompetition(competition);
+
+  const handlePublish = async () => {
+    if (!publishable) {
+      toast.error("Competition cannot be published after registration closes.");
+      return;
+    }
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      toast.error("Please sign in again");
+      navigate("/login");
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/competitions/${competition.id}/publish`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        let msg = "Failed to publish competition";
+        try {
+          const ct = res.headers.get("content-type") || "";
+          if (ct.includes("application/json")) {
+            const data = await res.json();
+            msg = data.message || msg;
+          } else {
+            msg = await res.text() || msg;
+          }
+        } catch {}
+        toast.error(msg);
+        return;
+      }
+      toast.success("Competition published successfully");
+      invalidateApiCache((key) => {
+        const value = String(key);
+        return value.includes("/api/competitions")
+          || value.includes("competitions:")
+          || value.includes("teacher:competition:")
+          || value.includes("competition:");
+      });
+      window.dispatchEvent(new CustomEvent("competitions:updated"));
+      navigate("/teacher/competitions");
+    } catch (e) {
+      toast.error("Unable to publish competition");
+    }
   };
 
+  const handleDelete = async () => {
+    if (!deletable) {
+      toast.error("Competition can be deleted only after submission deadline.");
+      return;
+    }
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      toast.error("Please sign in again");
+      navigate("/login");
+      return;
+    }
+    if (!confirm("Are you sure you want to delete this competition? This action cannot be undone.")) return;
+    try {
+      const endpoints = [
+        `${API_BASE_URL}/api/competitions/${competition.id}`,
+        `${API_BASE_URL}/api/teacher/competitions/${competition.id}`,
+      ];
+      let deleted = false;
+      let lastResp = null;
+      for (const ep of endpoints) {
+        try {
+          const res = await fetch(ep, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          lastResp = res;
+          if (res.ok) { deleted = true; break; }
+          if (res.status === 404) continue;
+          const ct = res.headers.get("content-type") || "";
+          const body = ct.includes("application/json") ? await res.json().catch(() => null) : await res.text().catch(() => null);
+          toast.error((body && (body.message || JSON.stringify(body))) || `Failed to delete (${res.status})`);
+          return;
+        } catch (inner) {
+          // try next
+        }
+      }
+      if (!deleted) {
+        if (lastResp) toast.error(`Failed to delete (${lastResp.status})`);
+        else toast.error("Failed to delete competition");
+        return;
+      }
+      toast.success("Competition deleted");
+      invalidateApiCache((key) => {
+        const value = String(key);
+        return value.includes("/api/competitions")
+          || value.includes("competitions:")
+          || value.includes("teacher:competition:")
+          || value.includes("competition:");
+      });
+      window.dispatchEvent(new CustomEvent("competitions:updated"));
+      navigate("/teacher/competitions");
+    } catch (e) {
+      toast.error("Unable to delete competition");
+    }
+  };
+
+  
   return (
     <AppLayout role="teacher">
       <div className="max-w-5xl mx-auto space-y-6 animate-fade-in">
@@ -171,8 +297,14 @@ export default function TeacherCompetitionDetail() {
                 <h1 className="text-2xl lg:text-3xl font-display font-bold text-foreground">
                   {competition.title}
                 </h1>
-                <span className={cn("badge-status text-xs", statusStyles[competition.status].bg, statusStyles[competition.status].text)}>
-                  {statusStyles[competition.status].label}
+                <span
+                  className={cn(
+                    "badge-status text-xs",
+                    statusStyles[competition.status]?.bg ?? "bg-muted",
+                    statusStyles[competition.status]?.text ?? "text-muted-foreground"
+                  )}
+                >
+                  {statusStyles[competition.status]?.label ?? competition.status}
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -186,9 +318,9 @@ export default function TeacherCompetitionDetail() {
               <p className="text-muted-foreground">{competition.description}</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              {competition.status !== "closed" && (
+              {competition.status !== "CLOSED" && editable && (
                 <Button variant="outline" className="gap-2" asChild>
-                  <Link to={`/teacher/competitions/${id}/edit`}>
+                  <Link to={`/teacher/competitions/${competition.id}/edit`}>
                     <Edit className="w-4 h-4" />
                     Edit
                   </Link>
@@ -196,20 +328,34 @@ export default function TeacherCompetitionDetail() {
               )}
               {competition.format === "quiz" && (
                 <Button variant="outline" className="gap-2" asChild>
-                  <Link to={`/teacher/competitions/${id}/questions`}>
+                  <Link to={`/teacher/competitions/${competition.id}/questions`}>
                     <FileText className="w-4 h-4" />
                     Manage Questions
                   </Link>
                 </Button>
               )}
-              {competition.status === "draft" && (
+              {publishable && (
                 <Button className="gap-2" onClick={handlePublish}>
                   <Send className="w-4 h-4" />
                   Publish
                 </Button>
               )}
+              <Button variant="destructive" className="gap-2" onClick={handleDelete} disabled={!deletable}>
+                <Trash2 className="w-4 h-4" />
+                Delete
+              </Button>
             </div>
           </div>
+          {!editable && (
+            <p className="text-sm text-warning mt-4">
+              Editing is locked because registration has already closed.
+            </p>
+          )}
+          {!deletable && (
+            <p className="text-sm text-muted-foreground mt-2">
+              Delete is available only after submission deadline.
+            </p>
+          )}
         </div>
 
         {/* Stats Grid */}
@@ -281,12 +427,36 @@ export default function TeacherCompetitionDetail() {
           </div>
         )}
 
+        {/* Materials */}
+        <div className="card-static p-6">
+          <h3 className="text-lg font-semibold text-foreground mb-4">Materials</h3>
+          {competition.materialsFiles && competition.materialsFiles.length > 0 ? (
+            <div className="space-y-2">
+              {competition.materialsFiles.map((file, idx) => (
+                <div key={`${file.path || file.name}-${idx}`} className="flex items-center gap-2">
+                  <a
+                    href={file.path ? resolveFileUrl(file.path) : "#"}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary underline truncate"
+                  >
+                    {file.name}
+                  </a>
+                  <span className="text-sm text-muted-foreground">(Click to download)</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No materials provided for this competition.</p>
+          )}
+        </div>
+
         {/* Quick Actions */}
         <div className="card-static p-6">
           <h3 className="text-lg font-semibold text-foreground mb-4">Quick Actions</h3>
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <Button variant="outline" className="h-auto py-4 flex-col gap-2" asChild>
-              <Link to={`/teacher/submissions?competition=${id}`}>
+              <Link to={`/teacher/submissions?competition=${competition.id}`}>
                 <Upload className="w-5 h-5" />
                 <span>View Submissions</span>
               </Link>
@@ -299,18 +469,20 @@ export default function TeacherCompetitionDetail() {
             </Button>
             {competition.format === "quiz" && (
               <Button variant="outline" className="h-auto py-4 flex-col gap-2" asChild>
-                <Link to={`/teacher/competitions/${id}/questions`}>
+                <Link to={`/teacher/competitions/${competition.id}/questions`}>
                   <FileText className="w-5 h-5" />
                   <span>Manage Questions</span>
                 </Link>
               </Button>
             )}
-            <Button variant="outline" className="h-auto py-4 flex-col gap-2" asChild>
-              <Link to={`/teacher/competitions/${id}/edit`}>
-                <Edit className="w-5 h-5" />
-                <span>Edit Competition</span>
-              </Link>
-            </Button>
+            {editable && (
+              <Button variant="outline" className="h-auto py-4 flex-col gap-2" asChild>
+                <Link to={`/teacher/competitions/${competition.id}/edit`}>
+                  <Edit className="w-5 h-5" />
+                  <span>Edit Competition</span>
+                </Link>
+              </Button>
+            )}
           </div>
         </div>
       </div>

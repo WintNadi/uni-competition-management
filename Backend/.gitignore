@@ -1,0 +1,11 @@
+# Application Configuration
+SPRING_APPLICATION_NAME=CompetitionManagementProject
+
+# MongoDB Configuration - Replace with your actual connection string
+MONGODB_URI=mongodb+srv://your_username:your_password@cluster0.xxxxx.mongodb.net/competition_management?retryWrites=true&w=majority
+
+# Server Configuration
+SERVER_PORT=8082
+
+# Logging
+LOGGING_LEVEL_SPRING_SECURITY=DEBUG

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { 
   ArrowLeft, Upload, Plus, Edit, Trash2, Search,
   FileText, CheckCircle, AlertCircle, Download, X,
@@ -9,52 +9,55 @@ import { AppLayout } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { API_BASE_URL, fetchJsonCached, invalidateApiCache } from "@/lib/api";
 
-const mockQuestions = [
-  {
-    id: 1,
-    type: "mcq",
-    question: "What does HTML stand for?",
-    options: ["Hyper Text Markup Language", "High Tech Modern Language", "Hyper Transfer Markup Language", "Home Tool Markup Language"],
-    correctAnswer: 0,
-    marks: 2,
-    difficulty: "easy",
-  },
-  {
-    id: 2,
-    type: "true_false",
-    question: "CSS is a programming language.",
-    correctAnswer: false,
-    marks: 1,
-    difficulty: "easy",
-  },
-  {
-    id: 3,
-    type: "mcq",
-    question: "Which of the following is NOT a JavaScript framework?",
-    options: ["React", "Angular", "Django", "Vue"],
-    correctAnswer: 2,
-    marks: 2,
-    difficulty: "medium",
-  },
-  {
-    id: 4,
-    type: "fill_blank",
-    question: "The CSS property used to change text color is called _____.",
-    correctAnswer: "color",
-    marks: 2,
-    difficulty: "easy",
-  },
-  {
-    id: 5,
-    type: "mcq",
-    question: "What is the time complexity of binary search?",
-    options: ["O(n)", "O(log n)", "O(n²)", "O(1)"],
-    correctAnswer: 1,
-    marks: 3,
-    difficulty: "hard",
-  },
-];
+const mapTypeFromBackend = (t) => {
+  switch (t) {
+    case "MULTIPLE_CHOICE":
+      return "mcq";
+    case "TRUE_FALSE":
+      return "true_false";
+    case "FILL_IN_BLANK":
+      return "fill_blank";
+    default:
+      return "mcq";
+  }
+};
+
+const mapTypeToBackend = (t) => {
+  switch (t) {
+    case "mcq":
+      return "MULTIPLE_CHOICE";
+    case "true_false":
+      return "TRUE_FALSE";
+    case "fill_blank":
+      return "FILL_IN_BLANK";
+    default:
+      return "MULTIPLE_CHOICE";
+  }
+};
+
+const mapDifficultyFromBackend = (d) => {
+  if (!d) return "medium";
+  return d.toLowerCase();
+};
+
+const mapDifficultyToBackend = (d) => {
+  if (!d) return "MEDIUM";
+  return d.toUpperCase();
+};
+
+const normalizeOptions = (options) =>
+  (Array.isArray(options) ? options : [])
+    .map((option) => String(option ?? "").trim())
+    .filter((option) => option.length > 0);
+
+const optionLabel = (index) => String.fromCharCode(65 + index);
+
+const parseMcqCorrectAnswer = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
 
 const typeStyles = {
   mcq: { label: "Multiple Choice", bg: "bg-info/10", text: "text-info" },
@@ -71,7 +74,10 @@ const difficultyStyles = {
 export default function QuestionManagement() {
   const navigate = useNavigate();
   const { id } = useParams();
-  const [questions, setQuestions] = useState(mockQuestions);
+  const competitionId = id;
+  const location = useLocation();
+  const [competitionName, setCompetitionName] = useState(location.state?.competitionName || "");
+  const [questions, setQuestions] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [difficultyFilter, setDifficultyFilter] = useState("all");
@@ -80,6 +86,74 @@ export default function QuestionManagement() {
   const [showUploadModal, setShowUploadModal] = useState(false);
   const [editingQuestion, setEditingQuestion] = useState(null);
   const [validationErrors, setValidationErrors] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      setLoading(false);
+      return;
+    }
+    if (!competitionId) {
+      setQuestions([]);
+      setLoading(false);
+      return;
+    }
+
+    const load = async () => {
+      try {
+        const data = await fetchJsonCached(`${API_BASE_URL}/api/teacher/competitions/${competitionId}/questions`, {
+          token,
+          ttlMs: 60000,
+          force: false,
+          cacheKey: `teacher:questions:${competitionId}`,
+        });
+        const mapped = (Array.isArray(data) ? data : []).map((q) => {
+          const type = mapTypeFromBackend(q.questionType);
+          const options = type === "mcq" ? normalizeOptions(q.options) : [];
+          return {
+            id: q.id,
+            type,
+            question: q.question,
+            options,
+            correctAnswer: type === "mcq" ? parseMcqCorrectAnswer(q.correctAnswer) : q.correctAnswer,
+            marks: q.marks ?? 1,
+            difficulty: mapDifficultyFromBackend(q.difficulty),
+          };
+        });
+        setQuestions(mapped);
+        // if competition name not provided via state and we have id, try to extract from payload
+        if (competitionId && !competitionName && mapped.length > 0 && data.competitionTitle) {
+          setCompetitionName(data.competitionTitle || "");
+        }
+      } catch (e) {
+        toast.error("Unable to load questions");
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, [competitionId]);
+
+  // If competitionId is present but we still don't have a name, fetch the competition minimal info
+  useEffect(() => {
+    if (!competitionId || competitionName) return;
+    const token = localStorage.getItem("userToken");
+    if (!token) return;
+    (async () => {
+      try {
+        const c = await fetchJsonCached(`${API_BASE_URL}/api/competitions/${competitionId}`, {
+          token,
+          ttlMs: 120000,
+          force: false,
+          cacheKey: `teacher:competition:${competitionId}`,
+        });
+        setCompetitionName(c.title || c.name || "");
+      } catch (e) {
+        // ignore
+      }
+    })();
+  }, [competitionId, competitionName]);
 
   const filteredQuestions = questions.filter(q => {
     const matchesSearch = q.question.toLowerCase().includes(searchQuery.toLowerCase());
@@ -105,14 +179,90 @@ export default function QuestionManagement() {
   };
 
   const handleBulkDelete = () => {
-    setQuestions(prev => prev.filter(q => !selectedQuestions.includes(q.id)));
-    toast.success(`${selectedQuestions.length} questions deleted`);
-    setSelectedQuestions([]);
+    if (!competitionId) {
+      toast.error("Please open Question Management from a specific competition.");
+      return;
+    }
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      toast.error("Please sign in again");
+      navigate("/login");
+      return;
+    }
+    const ids = selectedQuestions;
+    if (ids.length === 0) return;
+    fetch(`${API_BASE_URL}/api/teacher/competitions/${competitionId}/questions`, {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(ids),
+    })
+      .then((res) => {
+        if (!res.ok) {
+          toast.error("Failed to delete questions");
+          return;
+        }
+        setQuestions(prev => prev.filter(q => !ids.includes(q.id)));
+        invalidateApiCache((key) => {
+          const value = String(key);
+          return value.includes(`/api/teacher/competitions/${competitionId}/questions`)
+            || value.includes("teacher:questions:");
+        });
+        invalidateApiCache((key) => {
+          const value = String(key);
+          return value.includes("/api/competitions")
+            || value.includes("competitions:")
+            || value.includes("teacher:question:competitions");
+        });
+        window.dispatchEvent(new CustomEvent("competitions:updated"));
+        toast.success(`${ids.length} questions deleted`);
+        setSelectedQuestions([]);
+      })
+      .catch(() => {
+        toast.error("Failed to delete questions");
+      });
   };
 
   const handleDeleteQuestion = (id) => {
-    setQuestions(prev => prev.filter(q => q.id !== id));
-    toast.success("Question deleted");
+    if (!competitionId) {
+      toast.error("Please open Question Management from a specific competition.");
+      return;
+    }
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      toast.error("Please sign in again");
+      navigate("/login");
+      return;
+    }
+    fetch(`${API_BASE_URL}/api/teacher/competitions/${competitionId}/questions/${id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => {
+        if (!res.ok) {
+          toast.error("Failed to delete question");
+          return;
+        }
+        setQuestions(prev => prev.filter(q => q.id !== id));
+        invalidateApiCache((key) => {
+          const value = String(key);
+          return value.includes(`/api/teacher/competitions/${competitionId}/questions`)
+            || value.includes("teacher:questions:");
+        });
+        invalidateApiCache((key) => {
+          const value = String(key);
+          return value.includes("/api/competitions")
+            || value.includes("competitions:")
+            || value.includes("teacher:question:competitions");
+        });
+        window.dispatchEvent(new CustomEvent("competitions:updated"));
+        toast.success("Question deleted");
+      })
+      .catch(() => {
+        toast.error("Failed to delete question");
+      });
   };
 
   const handleExcelUpload = (e) => {
@@ -139,16 +289,33 @@ export default function QuestionManagement() {
         {/* Header */}
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div className="flex items-center gap-4">
-            <Button variant="ghost" size="icon" onClick={() => navigate(-1)}>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() =>
+                competitionId
+                  ? navigate(`/teacher/competitions/${competitionId}`)
+                  : navigate("/teacher/competitions")
+              }
+            >
               <ArrowLeft className="w-5 h-5" />
             </Button>
             <div>
               <h1 className="text-2xl lg:text-3xl font-display font-bold text-foreground">
                 Question Management
               </h1>
-              <p className="text-muted-foreground mt-1">
-                Web Development Quiz • {questions.length} questions • {totalMarks} total marks
-              </p>
+              {competitionName ? (
+                <>
+                  <p className="text-sm text-muted-foreground">{competitionName}</p>
+                  <p className="text-muted-foreground mt-1">
+                    {questions.length} questions • {totalMarks} total marks
+                  </p>
+                </>
+              ) : (
+                <p className="text-muted-foreground mt-1">
+                  {questions.length} questions • {totalMarks} total marks
+                </p>
+              )}
             </div>
           </div>
           <div className="flex gap-3">
@@ -255,7 +422,12 @@ export default function QuestionManagement() {
           </div>
 
           {/* Questions */}
-          {filteredQuestions.map((question, index) => (
+          {loading && (
+            <div className="p-6 text-center text-muted-foreground">
+              Loading questions...
+            </div>
+          )}
+          {!loading && filteredQuestions.map((question, index) => (
             <div key={question.id} className="p-4 flex items-start gap-4 hover:bg-muted/30 transition-colors">
               <input
                 type="checkbox"
@@ -338,7 +510,7 @@ export default function QuestionManagement() {
             </div>
           ))}
 
-          {filteredQuestions.length === 0 && (
+          {!loading && filteredQuestions.length === 0 && (
             <div className="p-12 text-center">
               <FileText className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
               <h3 className="text-lg font-semibold text-foreground mb-2">No questions found</h3>
@@ -423,16 +595,110 @@ export default function QuestionManagement() {
           <QuestionFormModal 
             question={editingQuestion}
             onClose={() => { setShowAddModal(false); setEditingQuestion(null); }}
-            onSave={(question) => {
-              if (editingQuestion) {
-                setQuestions(prev => prev.map(q => q.id === question.id ? question : q));
-                toast.success("Question updated");
-              } else {
-                setQuestions(prev => [...prev, { ...question, id: Date.now() }]);
-                toast.success("Question added");
+            onSave={async (question) => {
+              if (!competitionId) {
+                toast.error("Please open Question Management from a specific competition.");
+                return;
               }
-              setShowAddModal(false);
-              setEditingQuestion(null);
+              const token = localStorage.getItem("userToken");
+              if (!token) {
+                toast.error("Please sign in again");
+                navigate("/login");
+                return;
+              }
+
+                const payload = {
+                question: question.question,
+                questionType: mapTypeToBackend(question.type),
+                options: null,
+                marks: Number(question.marks || 1),
+                correctAnswer: question.correctAnswer,
+                difficulty: mapDifficultyToBackend(question.difficulty),
+              };
+
+              if (question.type === "mcq") {
+                const indexedOptions = (Array.isArray(question.options) ? question.options : [])
+                  .map((option, index) => ({ option: String(option ?? "").trim(), index }))
+                  .filter((item) => item.option.length > 0);
+                if (indexedOptions.length < 2) {
+                  toast.error("Multiple choice questions require at least two filled options.");
+                  return;
+                }
+                const originalCorrectIndex = parseMcqCorrectAnswer(question.correctAnswer);
+                const selectedOption = indexedOptions.find((item) => item.index === originalCorrectIndex);
+                if (!selectedOption) {
+                  toast.error("Please select a valid correct option.");
+                  return;
+                }
+                payload.options = indexedOptions.map((item) => item.option);
+                payload.correctAnswer = indexedOptions.findIndex((item) => item.index === selectedOption.index);
+              }
+
+              const isEdit = !!question.id;
+              const url = isEdit
+                ? `${API_BASE_URL}/api/teacher/competitions/${competitionId}/questions/${question.id}`
+                : `${API_BASE_URL}/api/teacher/competitions/${competitionId}/questions`;
+
+              try {
+                const res = await fetch(url, {
+                  method: isEdit ? "PUT" : "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                  },
+                  body: JSON.stringify(payload),
+                });
+                if (!res.ok) {
+                  let msg = isEdit ? "Failed to update question" : "Failed to add question";
+                  try {
+                    const ct = res.headers.get("content-type") || "";
+                    if (ct.includes("application/json")) {
+                      const data = await res.json();
+                      msg = data.message || msg;
+                    } else {
+                      msg = await res.text() || msg;
+                    }
+                  } catch {}
+                  toast.error(msg);
+                  return;
+                }
+                const saved = await res.json();
+                const mapped = {
+                  id: saved.id,
+                  type: mapTypeFromBackend(saved.questionType),
+                  question: saved.question,
+                  options: mapTypeFromBackend(saved.questionType) === "mcq" ? normalizeOptions(saved.options) : [],
+                  correctAnswer: mapTypeFromBackend(saved.questionType) === "mcq"
+                    ? parseMcqCorrectAnswer(saved.correctAnswer)
+                    : saved.correctAnswer,
+                  marks: saved.marks ?? 1,
+                  difficulty: mapDifficultyFromBackend(saved.difficulty),
+                };
+
+                if (isEdit) {
+                  setQuestions(prev => prev.map(q => q.id === mapped.id ? mapped : q));
+                  toast.success("Question updated");
+                } else {
+                  setQuestions(prev => [...prev, mapped]);
+                  toast.success("Question added");
+                }
+                invalidateApiCache((key) => {
+                  const value = String(key);
+                  return value.includes(`/api/teacher/competitions/${competitionId}/questions`)
+                    || value.includes("teacher:questions:");
+                });
+                invalidateApiCache((key) => {
+                  const value = String(key);
+                  return value.includes("/api/competitions")
+                    || value.includes("competitions:")
+                    || value.includes("teacher:question:competitions");
+                });
+                window.dispatchEvent(new CustomEvent("competitions:updated"));
+                setShowAddModal(false);
+                setEditingQuestion(null);
+              } catch (e) {
+                toast.error("Unable to save question");
+              }
             }}
           />
         )}
@@ -446,7 +712,12 @@ function QuestionFormModal({ question, onClose, onSave }) {
     if (question) {
       return {
         ...question,
-        options: question.options || ["", "", "", ""],
+        options: Array.isArray(question.options) && question.options.length > 0
+          ? [...question.options]
+          : ["", "", "", ""],
+        correctAnswer: question.type === "mcq"
+          ? parseMcqCorrectAnswer(question.correctAnswer)
+          : question.correctAnswer,
       };
     }
     return {
@@ -469,6 +740,34 @@ function QuestionFormModal({ question, onClose, onSave }) {
       ...prev,
       options: prev.options.map((opt, i) => i === index ? value : opt),
     }));
+  };
+
+  const addOption = () => {
+    setFormData((prev) => ({
+      ...prev,
+      options: [...(Array.isArray(prev.options) ? prev.options : []), ""],
+    }));
+  };
+
+  const removeOption = (index) => {
+    setFormData((prev) => {
+      const options = Array.isArray(prev.options) ? prev.options : [];
+      if (options.length <= 2) {
+        return prev;
+      }
+      const nextOptions = options.filter((_, i) => i !== index);
+      let nextCorrect = parseMcqCorrectAnswer(prev.correctAnswer);
+      if (nextCorrect === index) {
+        nextCorrect = 0;
+      } else if (nextCorrect > index) {
+        nextCorrect -= 1;
+      }
+      return {
+        ...prev,
+        options: nextOptions,
+        correctAnswer: nextCorrect,
+      };
+    });
   };
 
   const handleSubmit = (e) => {
@@ -554,16 +853,33 @@ function QuestionFormModal({ question, onClose, onSave }) {
                       onChange={() => setFormData(prev => ({ ...prev, correctAnswer: index }))}
                       className="w-4 h-4"
                     />
-                    <span className="w-6 text-muted-foreground">{String.fromCharCode(65 + index)}.</span>
+                    <span className="w-6 text-muted-foreground">{optionLabel(index)}.</span>
                     <input
                       type="text"
                       value={option}
                       onChange={(e) => handleOptionChange(index, e.target.value)}
-                      placeholder={`Option ${String.fromCharCode(65 + index)}`}
+                      placeholder={`Option ${optionLabel(index)}`}
                       className="flex-1 h-10 px-4 rounded-lg bg-muted/50 border border-border text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                     />
+                    {formData.options.length > 2 && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="text-destructive hover:bg-destructive/10"
+                        onClick={() => removeOption(index)}
+                      >
+                        <X className="w-4 h-4" />
+                      </Button>
+                    )}
                   </div>
                 ))}
+              </div>
+              <div className="mt-3">
+                <Button type="button" variant="outline" size="sm" onClick={addOption}>
+                  <Plus className="w-4 h-4 mr-1" />
+                  Add Option
+                </Button>
               </div>
               <p className="text-xs text-muted-foreground mt-2">Select the correct answer</p>
             </div>

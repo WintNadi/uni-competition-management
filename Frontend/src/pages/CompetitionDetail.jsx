@@ -1,15 +1,15 @@
 import { useState, useEffect } from "react";
-import { useParams, useLocation, Link, useNavigate } from "react-router-dom";
+import { useParams, useLocation, useNavigate } from "react-router-dom";
 import { 
   ArrowLeft, Calendar, Users, Clock, ExternalLink, Building, 
   FileText, Download, UserPlus, UsersRound, AlertCircle, CheckCircle2, User, X, Send,
-  Search, MapPin, Globe, Award
+  Search, MapPin, Globe
 } from "lucide-react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { API_BASE_URL } from "@/lib/api";
+import { API_BASE_URL, fetchJsonCached, invalidateApiCache, resolveFileUrl } from "@/lib/api";
 
 // Extended competitions database with all competitions
 const competitionsData = {
@@ -306,20 +306,6 @@ const competitionsData = {
 };
 
 
-// Mock all users for invite search
-const mockAllUsers = [
-  { id: "user2", name: "Emily Chen", email: "emily@university.edu", avatar: "E" },
-  { id: "user3", name: "James Wilson", email: "james@university.edu", avatar: "J" },
-  { id: "user4", name: "Sofia Rodriguez", email: "sofia@university.edu", avatar: "S" },
-  { id: "user5", name: "Alex Park", email: "alex@university.edu", avatar: "A" },
-  { id: "user6", name: "Lisa Kim", email: "lisa@university.edu", avatar: "L" },
-  { id: "user9", name: "Tom Brown", email: "tom@university.edu", avatar: "T" },
-  { id: "user10", name: "Maria Garcia", email: "maria@university.edu", avatar: "M" },
-  { id: "user11", name: "David Lee", email: "david@university.edu", avatar: "D" },
-  { id: "user12", name: "Anna Smith", email: "anna@university.edu", avatar: "A" },
-];
-
-
 const statusStyles = {
   open: "bg-success/10 text-success border-success/20",
   upcoming: "bg-info/10 text-info border-info/20",
@@ -330,23 +316,87 @@ const formatDate = (value) => {
   if (!value) return "";
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 };
 
-const deriveStatus = (registrationDeadline) => {
-  if (!registrationDeadline) return "open";
-  const d = new Date(registrationDeadline);
-  if (Number.isNaN(d.getTime())) return "open";
-  return new Date() > d ? "closed" : "open";
+const formatDateOnly = (value) => {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 };
 
-const buildTimeline = (registrationDeadline, submissionDeadline) => {
+const mapStudentStatus = ({
+  type,
+  backendStatus,
+  registrationOpen,
+  registrationClose,
+  submissionDeadline,
+  startDate,
+  endDate,
+}) => {
+  const now = new Date();
+  const upperStatus = backendStatus ? String(backendStatus).toUpperCase() : "";
+
+  if (type === "external") {
+    const regOpen = registrationOpen ? new Date(registrationOpen) : null;
+    const regClose = registrationClose ? new Date(registrationClose) : null;
+    const hasWindow = regOpen && !Number.isNaN(regOpen.getTime())
+      && regClose && !Number.isNaN(regClose.getTime());
+
+    if (hasWindow) {
+      if (now < regOpen) return "upcoming";
+      if (now > regClose) return "closed";
+      return "open";
+    }
+
+    const end = endDate ? new Date(endDate) : null;
+    if (end && now > end) return "closed";
+
+    const start = startDate ? new Date(startDate) : null;
+    if (start && now < start) return "upcoming";
+
+    return upperStatus === "COMPLETED" ? "closed" : "upcoming";
+  }
+
+  if (upperStatus === "CLOSED") return "closed";
+  if (upperStatus === "DRAFT") return "upcoming";
+
+  const regOpen = registrationOpen ? new Date(registrationOpen) : null;
+  const regClose = registrationClose ? new Date(registrationClose) : null;
+  const submit = submissionDeadline ? new Date(submissionDeadline) : null;
+
+  if (regOpen && !Number.isNaN(regOpen.getTime()) && now < regOpen) return "upcoming";
+  if (regClose && !Number.isNaN(regClose.getTime()) && now > regClose) return "closed";
+  if (submit && !Number.isNaN(submit.getTime()) && now > submit) return "closed";
+  return "open";
+};
+
+const buildTimeline = (registrationOpen, registrationClose, submissionDeadline) => {
   const now = new Date();
   const items = [];
-  if (registrationDeadline) {
-    const d = new Date(registrationDeadline);
+  if (registrationOpen) {
+    const d = new Date(registrationOpen);
     items.push({
-      date: formatDate(registrationDeadline),
+      date: formatDate(registrationOpen),
+      event: "Registration Opens",
+      completed: !Number.isNaN(d.getTime()) && now >= d,
+    });
+  }
+  if (registrationClose) {
+    const d = new Date(registrationClose);
+    items.push({
+      date: formatDate(registrationClose),
       event: "Registration Closes",
       completed: !Number.isNaN(d.getTime()) && now > d,
     });
@@ -365,18 +415,40 @@ const buildTimeline = (registrationDeadline, submissionDeadline) => {
 const normalizeCompetition = (raw) => {
   const type = (raw?.competitionType || raw?.type || "internal").toLowerCase();
   const participation = (raw?.participationType || raw?.participation || "individual").toLowerCase();
-  const registrationDeadline = raw?.registrationDeadline || raw?.registration_deadline;
+  const registrationOpen = raw?.registrationOpen || raw?.registration_open || null;
+  const registrationClose = raw?.registrationClose || raw?.registration_close || raw?.registrationDeadline || raw?.registration_deadline;
+  const registrationDeadline = registrationClose || registrationOpen;
   const submissionDeadline = raw?.submissionDeadline || raw?.submission_deadline;
+  const startDate = raw?.startDate || raw?.start;
+  const endDate = raw?.endDate || raw?.end;
+  const formattedStartDate = type === "external" ? formatDateOnly(startDate) : formatDate(startDate);
+  const formattedEndDate = type === "external" ? formatDateOnly(endDate) : formatDate(endDate);
   const rules = Array.isArray(raw?.rules) ? raw.rules : [];
-  const materials = Array.isArray(raw?.materials)
-    ? raw.materials
-    : raw?.materials
-      ? [{ name: raw.materials, size: "" }]
+  const materialNames = Array.isArray(raw?.materialsFileNames)
+    ? raw.materialsFileNames
+    : raw?.materialsFileName
+      ? [raw.materialsFileName]
       : [];
-  const prizes = Array.isArray(raw?.prizes) ? raw.prizes : [];
+  const materialPaths = Array.isArray(raw?.materialsFilePaths)
+    ? raw.materialsFilePaths
+    : raw?.materialsFilePath
+      ? [raw.materialsFilePath]
+      : [];
+  let materials = materialNames.map((name, idx) => ({
+    name,
+    path: materialPaths[idx] || null,
+    size: "",
+  }));
+  if (materials.length === 0) {
+    materials = Array.isArray(raw?.materials)
+      ? raw.materials
+      : raw?.materials
+        ? [{ name: raw.materials, path: null, size: "" }]
+        : [];
+  }
   const timeline = Array.isArray(raw?.timeline)
     ? raw.timeline
-    : buildTimeline(registrationDeadline, submissionDeadline);
+    : buildTimeline(registrationOpen, registrationClose, submissionDeadline);
   const teamSize = raw?.teamSize
     || (raw?.minTeamSize && raw?.maxTeamSize
       ? `${raw.minTeamSize}-${raw.maxTeamSize} members`
@@ -389,10 +461,22 @@ const normalizeCompetition = (raw) => {
     title: raw?.title || "Untitled Competition",
     description: raw?.description || (raw?.format ? `${raw.format} competition` : ""),
     category: raw?.category || raw?.format || "General",
+    startDate: formattedStartDate,
+    endDate: formattedEndDate,
     deadline: raw?.deadline || formatDate(submissionDeadline || registrationDeadline),
-    registrationDeadline: formatDate(registrationDeadline),
+    registrationOpen: formatDate(registrationOpen),
+    registrationClose: formatDate(registrationClose),
+    registrationDeadline: formatDate(registrationClose || registrationDeadline),
     submissionDeadline: formatDate(submissionDeadline),
-    status: raw?.status || deriveStatus(registrationDeadline),
+    status: mapStudentStatus({
+      type,
+      backendStatus: raw?.status,
+      registrationOpen,
+      registrationClose,
+      submissionDeadline,
+      startDate,
+      endDate,
+    }),
     type,
     participation,
     teamSize,
@@ -401,13 +485,12 @@ const normalizeCompetition = (raw) => {
     rules,
     materials,
     timeline,
-    prizes,
     organizer: raw?.organizer,
     mode: raw?.mode,
     location: raw?.location,
     scale: raw?.scale,
     eligibility: raw?.eligibility,
-    websiteLink: raw?.websiteLink,
+    websiteLink: raw?.websiteLink || raw?.website,
     format: raw?.format,
     totalMarks: raw?.totalMarks,
     quizDurationMinutes: raw?.quizDurationMinutes,
@@ -430,6 +513,8 @@ export default function CompetitionDetail() {
   const [teamsLoading, setTeamsLoading] = useState(false);
   const [teamsError, setTeamsError] = useState("");
   const [currentUserId, setCurrentUserId] = useState(localStorage.getItem("userId") || "");
+  const [studentDirectory, setStudentDirectory] = useState([]);
+  const [studentSearchLoading, setStudentSearchLoading] = useState(false);
   
   // Team creation form state
   const [teamName, setTeamName] = useState("");
@@ -438,26 +523,35 @@ export default function CompetitionDetail() {
   const [selectedInvites, setSelectedInvites] = useState([]);
   
   useEffect(() => {
-    const fetchCompetition = async () => {
+    let active = true;
+    const fetchCompetition = async (force = false) => {
       const token = localStorage.getItem("userToken");
       try {
-        const res = await fetch(`${API_BASE_URL}/competitions/${id}`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        const data = await fetchJsonCached(`${API_BASE_URL}/competitions/${id}`, {
+          token,
+          ttlMs: 120000,
+          force,
+          cacheKey: `competition:detail:${id}`,
         });
-        if (res.ok) {
-          const data = await res.json().catch(() => null);
-          setCompetitionData(data);
-          setLoadError("");
-        } else {
-          setLoadError(`Failed to load competition (${res.status})`);
-        }
+        if (!active) return;
+        setCompetitionData(data);
+        setLoadError("");
       } catch (err) {
+        if (!active) return;
         setLoadError(err.message || "Failed to load competition");
       } finally {
-        setLoading(false);
+        if (active) {
+          setLoading(false);
+        }
       }
     };
-    fetchCompetition();
+    fetchCompetition(false);
+    const handleCompetitionUpdate = () => fetchCompetition(false);
+    window.addEventListener("competitions:updated", handleCompetitionUpdate);
+    return () => {
+      active = false;
+      window.removeEventListener("competitions:updated", handleCompetitionUpdate);
+    };
   }, [id]);
 
   useEffect(() => {
@@ -466,11 +560,11 @@ export default function CompetitionDetail() {
       const token = localStorage.getItem("userToken");
       if (!token) return;
       try {
-        const res = await fetch(`${API_BASE_URL}/api/users/me`, {
-          headers: { Authorization: `Bearer ${token}` }
+        const data = await fetchJsonCached(`${API_BASE_URL}/api/users/me`, {
+          token,
+          ttlMs: 180000,
+          cacheKey: "users:me",
         });
-        if (!res.ok) return;
-        const data = await res.json().catch(() => null);
         if (data?.id) {
           setCurrentUserId(data.id);
           localStorage.setItem("userId", data.id);
@@ -506,11 +600,11 @@ export default function CompetitionDetail() {
       setTeamsLoading(true);
       setTeamsError("");
       try {
-        const res = await fetch(`${API_BASE_URL}/teams?competitionId=${competition.id}`, {
-          headers: { Authorization: `Bearer ${token}` }
+        const data = await fetchJsonCached(`${API_BASE_URL}/teams?competitionId=${competition.id}`, {
+          token,
+          ttlMs: 120000,
+          cacheKey: `teams:competition:${competition.id}`,
         });
-        if (!res.ok) throw new Error(`Failed to load teams (${res.status})`);
-        const data = await res.json().catch(() => []);
         setTeams(Array.isArray(data) ? data : []);
       } catch (err) {
         setTeamsError(err.message || "Failed to load teams");
@@ -522,8 +616,8 @@ export default function CompetitionDetail() {
   }, [competition?.id, competition?.participation, competition?.type]);
 
   useEffect(() => {
-    const fetchRegistrationStatus = async () => {
-      if (!competition?.id || competition?.type !== "internal") {
+    const fetchRegistrationStatus = async (force = false) => {
+      if (!competition?.id) {
         setIsRegistered(false);
         return;
       }
@@ -533,14 +627,12 @@ export default function CompetitionDetail() {
         return;
       }
       try {
-        const res = await fetch(`${API_BASE_URL}/competitions/registrations/me`, {
-          headers: { Authorization: `Bearer ${token}` }
+        const data = await fetchJsonCached(`${API_BASE_URL}/competitions/registrations/me`, {
+          token,
+          ttlMs: 120000,
+          force,
+          cacheKey: "registrations:me",
         });
-        if (!res.ok) {
-          setIsRegistered(false);
-          return;
-        }
-        const data = await res.json().catch(() => []);
         const list = Array.isArray(data) ? data : [];
         const registered = list.some((r) => String(r.competitionId) === String(competition.id));
         setIsRegistered(registered);
@@ -549,8 +641,64 @@ export default function CompetitionDetail() {
       }
     };
 
-    fetchRegistrationStatus();
+    fetchRegistrationStatus(false);
+    const handleRegistrationRefresh = () => fetchRegistrationStatus(false);
+    window.addEventListener("submissions:updated", handleRegistrationRefresh);
+    window.addEventListener("competitions:updated", handleRegistrationRefresh);
+    return () => {
+      window.removeEventListener("submissions:updated", handleRegistrationRefresh);
+      window.removeEventListener("competitions:updated", handleRegistrationRefresh);
+    };
   }, [competition?.id, competition?.type]);
+
+  useEffect(() => {
+    if (!showCreateTeamModal) {
+      setStudentDirectory([]);
+      setStudentSearchLoading(false);
+      return;
+    }
+    const token = localStorage.getItem("userToken");
+    if (!token) return;
+
+    const controller = new AbortController();
+    const loadStudents = async () => {
+      setStudentSearchLoading(true);
+      try {
+        const query = inviteSearch.trim();
+        const endpoint = `${API_BASE_URL}/api/users/students?query=${encodeURIComponent(query)}`;
+        const res = await fetch(endpoint, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          throw new Error(`Failed to search students (${res.status})`);
+        }
+        const data = await res.json().catch(() => []);
+        const normalized = (Array.isArray(data) ? data : []).map((user) => {
+          const username = user.username || user.fullName || user.email || "student";
+          return {
+            id: user.id,
+            username,
+            name: username,
+            email: user.email || "",
+            avatar: username.charAt(0).toUpperCase(),
+          };
+        });
+        setStudentDirectory(normalized);
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          setStudentDirectory([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setStudentSearchLoading(false);
+        }
+      }
+    };
+
+    loadStudents();
+    return () => controller.abort();
+  }, [showCreateTeamModal, inviteSearch]);
     
   const isTeamCompetition = competition?.participation === "team" && competition?.type === "internal";
   const isExternalCompetition = competition?.type === "external";
@@ -558,21 +706,74 @@ export default function CompetitionDetail() {
   const isUpcoming = competition?.status === "upcoming";
   const canRegister = competition?.status === "open";
 
+  let externalStatus = null;
+  let externalStatusLabel = "";
+  let externalStatusMessage = "";
+  if (isExternalCompetition) {
+    const now = new Date();
+    const regOpenValue = competition?.raw?.registrationOpen || competition?.raw?.registration_open || null;
+    const regCloseValue = competition?.raw?.registrationClose || competition?.raw?.registration_close
+      || competition?.raw?.registrationDeadline || competition?.raw?.registration_deadline || null;
+    const endValue = competition?.raw?.endDate || competition?.raw?.end || null;
+
+    const regOpen = regOpenValue ? new Date(regOpenValue) : null;
+    const regClose = regCloseValue ? new Date(regCloseValue) : null;
+    const end = endValue ? new Date(endValue) : null;
+    const hasWindow = regOpen && !Number.isNaN(regOpen.getTime())
+      && regClose && !Number.isNaN(regClose.getTime());
+
+    const regOpenLabel = competition?.registrationOpen || (regOpenValue ? formatDate(regOpenValue) : "");
+    const regCloseLabel = competition?.registrationClose || (regCloseValue ? formatDate(regCloseValue) : "");
+
+    if (!hasWindow) {
+      externalStatus = "upcoming";
+      externalStatusLabel = "Registration Schedule Not Set";
+      externalStatusMessage = "Registration dates have not been announced yet.";
+    } else if (now < regOpen) {
+      externalStatus = "upcoming";
+      externalStatusLabel = "Registration Not Open Yet";
+      externalStatusMessage = regOpenLabel
+        ? `Registration opens on ${regOpenLabel}.`
+        : "Registration has not opened yet.";
+    } else if (now > regClose) {
+      externalStatus = "closed";
+      if (end && !Number.isNaN(end.getTime()) && now > end) {
+        externalStatusLabel = "Competition Ended";
+        externalStatusMessage = "This competition has already ended.";
+      } else {
+        externalStatusLabel = "Registration Closed";
+        externalStatusMessage = regCloseLabel
+          ? `Registration closed on ${regCloseLabel}.`
+          : "Registration has closed for this competition.";
+      }
+    } else {
+      externalStatus = "open";
+      externalStatusLabel = "Registration Open";
+      externalStatusMessage = regCloseLabel
+        ? `Registration closes on ${regCloseLabel}.`
+        : "You can register for this competition now.";
+    }
+  }
+
   // Check if user already has a team for this competition
   const userTeam = teams.find(t =>
     t.leaderId === currentUserId || (t.acceptedMemberIds || []).includes(currentUserId)
   );
   const hasExistingTeam = !!userTeam;
-  const canRegisterTeam = !!(userTeam && userTeam.leaderId === currentUserId && userTeam.status === "ACTIVE" && !isRegistered && canRegister);
 
   const mapTeamToUi = (team) => {
     const memberIds = [team.leaderId, ...(team.acceptedMemberIds || [])]
       .filter(Boolean)
       .filter((v, i, arr) => arr.indexOf(v) === i);
+    const pendingRequestIds = Array.isArray(team.pendingJoinRequestIds) ? team.pendingJoinRequestIds : [];
+    const acceptedIds = Array.isArray(team.acceptedMemberIds) ? team.acceptedMemberIds : [];
+    const acceptedNames = Array.isArray(team.acceptedMemberUsernames) ? team.acceptedMemberUsernames : [];
+    const acceptedNameMap = new Map(acceptedIds.map((id, idx) => [id, acceptedNames[idx] || id]));
+    const leaderName = team.leaderUsername || acceptedNameMap.get(team.leaderId) || team.leaderId;
     const members = memberIds.map((id) => ({
       id,
-      name: id,
-      avatar: (id || "U").charAt(0).toUpperCase()
+      name: acceptedNameMap.get(id) || id,
+      avatar: (acceptedNameMap.get(id) || id || "U").charAt(0).toUpperCase()
     }));
     const maxSize = typeof competition?.maxTeamSize === "number" ? competition.maxTeamSize : null;
     const openSpots = maxSize == null ? null : Math.max(maxSize - memberIds.length, 0);
@@ -581,23 +782,22 @@ export default function CompetitionDetail() {
       name: team.teamName,
       leader: {
         id: team.leaderId,
-        name: team.leaderId,
-        avatar: (team.leaderId || "U").charAt(0).toUpperCase()
+        name: leaderName,
+        avatar: (leaderName || "U").charAt(0).toUpperCase()
       },
       members,
       maxSize,
       openSpots,
-      description: team.status === "ACTIVE" ? "Team is active" : "Team is pending"
+      description: team.status === "ACTIVE" ? "Team is active" : "Team is pending",
+      requestSent: pendingRequestIds.includes(currentUserId),
     };
   };
 
   const existingTeams = teams.map(mapTeamToUi);
 
   // Filter users for invite search
-  const filteredUsers = mockAllUsers.filter(user => 
-    (user.name.toLowerCase().includes(inviteSearch.toLowerCase()) ||
-    user.email.toLowerCase().includes(inviteSearch.toLowerCase())) &&
-    !selectedInvites.find(inv => inv.id === user.id)
+  const filteredUsers = studentDirectory.filter((user) =>
+    !selectedInvites.find((inv) => inv.id === user.id)
   );
 
   const registerCompetition = async (teamId) => {
@@ -618,6 +818,17 @@ export default function CompetitionDetail() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || "Registration failed");
       setIsRegistered(true);
+      invalidateApiCache((key) => {
+        const value = String(key);
+        return value.includes("/competitions/registrations/me")
+          || value.includes("registrations:me")
+          || value.includes("/competitions")
+          || value.includes("competitions:")
+          || value.includes("/teams")
+          || value.includes("teams:");
+      });
+      window.dispatchEvent(new CustomEvent("competitions:updated"));
+      window.dispatchEvent(new CustomEvent("submissions:updated"));
       toast.success("Successfully registered for the competition!");
       return true;
     } catch (err) {
@@ -646,7 +857,16 @@ export default function CompetitionDetail() {
         if (idx >= 0) next[idx] = data;
         return next;
       });
-      toast.success("Joined the team successfully!");
+      invalidateApiCache((key) => {
+        const value = String(key);
+        return value.includes("/teams")
+          || value.includes("teams:")
+          || value.includes("/competitions/registrations/me")
+          || value.includes("registrations:me");
+      });
+      window.dispatchEvent(new CustomEvent("teams:updated"));
+      window.dispatchEvent(new CustomEvent("competitions:updated"));
+      toast.success("Join request sent to the team leader.");
     } catch (err) {
       toast.error(err.message || "Join failed");
     }
@@ -684,10 +904,22 @@ export default function CompetitionDetail() {
       setTeams(prev => [data, ...prev]);
       toast.success(`Team "${teamName}" created successfully!`);
       if (data.status === "ACTIVE") {
-        await registerCompetition(data.teamId);
+        toast.success("Team is active and registered automatically.");
       } else {
         toast.info("Team is pending until minimum size is reached.");
       }
+      invalidateApiCache((key) => {
+        const value = String(key);
+        return value.includes("/teams")
+          || value.includes("teams:")
+          || value.includes("/competitions/registrations/me")
+          || value.includes("registrations:me")
+          || value.includes("/competitions")
+          || value.includes("competitions:");
+      });
+      window.dispatchEvent(new CustomEvent("teams:updated"));
+      window.dispatchEvent(new CustomEvent("competitions:updated"));
+      window.dispatchEvent(new CustomEvent("submissions:updated"));
       setShowCreateTeamModal(false);
       setTeamName("");
       setTeamDescription("");
@@ -706,15 +938,29 @@ export default function CompetitionDetail() {
     setSelectedInvites(prev => prev.filter(u => u.id !== userId));
   };
 
-  const handleDownload = (fileName) => {
-    // Simulate file download
-    const link = document.createElement('a');
-    link.href = '#';
-    link.download = fileName;
+  const handleDownload = (filePath, fileName) => {
+    if (!filePath) {
+      toast.error("This material is unavailable.");
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = resolveFileUrl(filePath);
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    if (fileName) {
+      link.download = fileName;
+    }
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    toast.success(`Downloading: ${fileName}`);
+  };
+
+  const handleBackNavigation = () => {
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      navigate(-1);
+      return;
+    }
+    navigate("/competitions");
   };
 
   if (!competition) {
@@ -730,7 +976,7 @@ export default function CompetitionDetail() {
                 <p className="text-destructive">Competition not found.</p>
                 {loadError && <p className="text-sm text-muted-foreground mt-2">{loadError}</p>}
                 <div className="mt-4">
-                  <Button onClick={() => navigate("/competitions")}>Back to Competitions</Button>
+                  <Button onClick={handleBackNavigation}>Back</Button>
                 </div>
               </>
             )}
@@ -744,13 +990,14 @@ export default function CompetitionDetail() {
     <AppLayout role="student">
       <div className="max-w-5xl mx-auto space-y-6 animate-fade-in">
         {/* Back Button */}
-        <Link 
-          to="/competitions" 
+        <button
+          type="button"
+          onClick={handleBackNavigation}
           className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to Competitions
-        </Link>
+          Back
+        </button>
 
         {/* Header */}
         <div className="card-static p-6 lg:p-8">
@@ -917,7 +1164,7 @@ export default function CompetitionDetail() {
                       {isRegistered
                         ? "Your team is registered for this competition."
                         : userTeam?.status === "ACTIVE"
-                          ? "Your team is active. Register the team to finalize."
+                          ? "Your team is active. Team registration is handled automatically."
                           : "Your team is pending until the minimum size is reached."}
                     </p>
                   </div>
@@ -960,8 +1207,8 @@ export default function CompetitionDetail() {
               <div>
                 <p className="font-medium text-foreground">External Competition</p>
                 <p className="text-sm text-muted-foreground">
-                  This is an external competition. Registration happens on the organizer's website. 
-                  After participating, submit your proof in the Submissions tab when admin allows uploads.
+                  This is an external competition. You must register here before participating.
+                  After the competition ends, submit your proof in the Submissions tab when admin allows uploads.
                 </p>
                 {competition.websiteLink && (
                   <a 
@@ -977,18 +1224,58 @@ export default function CompetitionDetail() {
             </div>
           )}
 
+          {isExternalCompetition && externalStatus && (
+            <div className={cn(
+              "border rounded-lg p-4 flex items-start gap-3 mb-6",
+              externalStatus === "closed" ? "bg-destructive/10 border-destructive/20" 
+              : externalStatus === "upcoming" ? "bg-info/10 border-info/20" 
+              : "bg-success/10 border-success/20"
+            )}>
+              {externalStatus === "closed" && <AlertCircle className="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" />}
+              {externalStatus === "upcoming" && <Clock className="w-5 h-5 text-info flex-shrink-0 mt-0.5" />}
+              {externalStatus === "open" && <CheckCircle2 className="w-5 h-5 text-success flex-shrink-0 mt-0.5" />}
+              <div>
+                <p className="font-medium text-foreground">
+                  {externalStatusLabel || "Registration Status"}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {externalStatusMessage || "Check the registration schedule for updates."}
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* Action Buttons - Different based on competition type */}
           <div className="flex flex-wrap gap-3">
             {isExternalCompetition ? (
-              // External competitions - view only, no registration button
-              competition.websiteLink && (
-                <a href={competition.websiteLink} target="_blank" rel="noopener noreferrer">
-                  <Button size="lg" className="gap-2">
-                    <ExternalLink className="w-4 h-4" />
-                    Visit Competition Website
+              <>
+                <Button
+                  size="lg"
+                  className="gap-2"
+                  disabled={
+                    isRegistered || externalStatus === "closed" || externalStatus === "upcoming"
+                  }
+                  onClick={handleRegisterIndividual}
+                >
+                  <User className="w-4 h-4" />
+                    {isRegistered
+                      ? "Registered"
+                      : externalStatus === "upcoming"
+                      ? "Coming Soon"
+                      : externalStatus === "closed"
+                      ? (externalStatusLabel || "Registration Closed")
+                      : "Register to Participate"}
                   </Button>
-                </a>
-              )
+
+                {competition.websiteLink && (
+                  <a href={competition.websiteLink} target="_blank" rel="noopener noreferrer">
+                    <Button size="lg" variant="outline" className="gap-2">
+                      <ExternalLink className="w-4 h-4" />
+                      Visit Official Website
+                    </Button>
+                  </a>
+                )}
+              </>
             ) : isTeamCompetition ? (
               // Internal team competition - create or join team
               <>
@@ -1018,12 +1305,12 @@ export default function CompetitionDetail() {
                 {hasExistingTeam && (
                   <Button
                     size="lg"
+                    variant="outline"
                     className="gap-2"
-                    disabled={!canRegisterTeam}
-                    onClick={() => registerCompetition(userTeam?.teamId)}
+                    disabled
                   >
                     <User className="w-4 h-4" />
-                    {canRegisterTeam ? "Register Team" : "Team Registered / Pending"}
+                    {userTeam?.status === "ACTIVE" ? "Team Active (Auto Registered)" : "Team Pending Activation"}
                   </Button>
                 )}
               </>
@@ -1046,23 +1333,25 @@ export default function CompetitionDetail() {
           {/* Main Content */}
           <div className="lg:col-span-2 space-y-6">
             {/* Rules */}
-            <section className="card-static p-6">
-              <h2 className="font-display font-semibold text-lg mb-4">Rules & Guidelines</h2>
-              {competition.rules.length > 0 ? (
-                <ul className="space-y-3">
-                  {competition.rules.map((rule, index) => (
-                    <li key={index} className="flex items-start gap-3 text-sm">
-                      <span className="w-6 h-6 rounded-full bg-secondary/10 text-secondary flex items-center justify-center flex-shrink-0 text-xs font-medium">
-                        {index + 1}
-                      </span>
-                      <span className="text-foreground">{rule}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-muted-foreground">No rules provided yet.</p>
-              )}
-            </section>
+            {!isExternalCompetition && (
+              <section className="card-static p-6">
+                <h2 className="font-display font-semibold text-lg mb-4">Rules & Guidelines</h2>
+                {competition.rules.length > 0 ? (
+                  <ul className="space-y-3">
+                    {competition.rules.map((rule, index) => (
+                      <li key={index} className="flex items-start gap-3 text-sm">
+                        <span className="w-6 h-6 rounded-full bg-secondary/10 text-secondary flex items-center justify-center flex-shrink-0 text-xs font-medium">
+                          {index + 1}
+                        </span>
+                        <span className="text-foreground">{rule}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No rules provided yet.</p>
+                )}
+              </section>
+            )}
 
             {/* Materials */}
             <section className="card-static p-6">
@@ -1085,7 +1374,7 @@ export default function CompetitionDetail() {
                         variant="outline" 
                         size="sm"
                         className="gap-1"
-                        onClick={() => handleDownload(material.name)}
+                        onClick={() => handleDownload(material.path, material.name)}
                       >
                         <Download className="w-4 h-4" />
                         Download
@@ -1098,71 +1387,47 @@ export default function CompetitionDetail() {
               )}
             </section>
 
-            {/* Prizes */}
-            <section className="card-static p-6">
-              <h2 className="font-display font-semibold text-lg mb-4">Prizes</h2>
-              {competition.prizes.length > 0 ? (
-                <div className="grid gap-3">
-                  {competition.prizes.map((prize, index) => (
-                    <div 
-                      key={index} 
-                      className={cn(
-                        "p-4 rounded-lg border",
-                        index === 0 
-                          ? "bg-achievement/5 border-achievement/20" 
-                          : index === 1 
-                          ? "bg-slate-100 border-slate-200 dark:bg-slate-800 dark:border-slate-700" 
-                          : "bg-amber-50 border-amber-200 dark:bg-amber-900/20 dark:border-amber-800"
-                      )}
-                    >
-                      <p className="font-semibold text-foreground">{prize.place}</p>
-                      <p className="text-sm text-muted-foreground">{prize.reward}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">No prizes listed.</p>
-              )}
-            </section>
           </div>
 
           {/* Sidebar */}
           <div className="space-y-6">
             {/* Timeline */}
-            <section className="card-static p-6">
-              <h2 className="font-display font-semibold text-lg mb-4">Timeline</h2>
-              {competition.timeline.length > 0 ? (
-                <div className="space-y-4">
-                  {competition.timeline.map((item, index) => (
-                    <div key={index} className="flex items-start gap-3">
-                      <div className={cn(
-                        "w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0",
-                        item.completed 
-                          ? "bg-success text-success-foreground" 
-                          : "bg-muted text-muted-foreground"
-                      )}>
-                        {item.completed ? (
-                          <CheckCircle2 className="w-4 h-4" />
-                        ) : (
-                          <Clock className="w-3 h-3" />
-                        )}
-                      </div>
-                      <div>
-                        <p className={cn(
-                          "text-sm font-medium",
-                          item.completed ? "text-muted-foreground" : "text-foreground"
+            {!isExternalCompetition && (
+              <section className="card-static p-6">
+                <h2 className="font-display font-semibold text-lg mb-4">Timeline</h2>
+                {competition.timeline.length > 0 ? (
+                  <div className="space-y-4">
+                    {competition.timeline.map((item, index) => (
+                      <div key={index} className="flex items-start gap-3">
+                        <div className={cn(
+                          "w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0",
+                          item.completed 
+                            ? "bg-success text-success-foreground" 
+                            : "bg-muted text-muted-foreground"
                         )}>
-                          {item.event}
-                        </p>
-                        <p className="text-xs text-muted-foreground">{item.date}</p>
+                          {item.completed ? (
+                            <CheckCircle2 className="w-4 h-4" />
+                          ) : (
+                            <Clock className="w-3 h-3" />
+                          )}
+                        </div>
+                        <div>
+                          <p className={cn(
+                            "text-sm font-medium",
+                            item.completed ? "text-muted-foreground" : "text-foreground"
+                          )}>
+                            {item.event}
+                          </p>
+                          <p className="text-xs text-muted-foreground">{item.date}</p>
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">No timeline available.</p>
-              )}
-            </section>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No timeline available.</p>
+                )}
+              </section>
+            )}
 
             {/* Category */}
             <section className="card-static p-6">
@@ -1257,6 +1522,9 @@ export default function CompetitionDetail() {
                 </div>
                 
                 {/* Search Results */}
+                {inviteSearch && studentSearchLoading && (
+                  <div className="mt-2 text-xs text-muted-foreground">Searching students...</div>
+                )}
                 {inviteSearch && filteredUsers.length > 0 && (
                   <div className="mt-2 border border-border rounded-lg divide-y divide-border max-h-40 overflow-y-auto">
                     {filteredUsers.slice(0, 5).map(user => (
@@ -1280,6 +1548,11 @@ export default function CompetitionDetail() {
                         </Button>
                       </div>
                     ))}
+                  </div>
+                )}
+                {inviteSearch && !studentSearchLoading && filteredUsers.length === 0 && (
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    No students found for this search.
                   </div>
                 )}
 
@@ -1341,7 +1614,7 @@ export default function CompetitionDetail() {
               ) : existingTeams.length > 0 ? (
                 existingTeams.map((team) => {
                   const isOwnTeam = team.leader.id === currentUserId;
-                  const requestSent = joinRequestSent[team.id];
+                  const requestSent = joinRequestSent[team.id] || team.requestSent;
                   
                   return (
                     <div 
@@ -1387,7 +1660,7 @@ export default function CompetitionDetail() {
                           ) : requestSent ? (
                             <Button size="sm" variant="outline" disabled className="gap-1">
                               <CheckCircle2 className="w-3 h-3" />
-                              Joined
+                              Request Sent
                             </Button>
                           ) : (
                             <Button 
@@ -1397,7 +1670,7 @@ export default function CompetitionDetail() {
                               onClick={() => handleJoinRequest(team.id)}
                             >
                               <Send className="w-3 h-3" />
-                              Join Team
+                              Request to Join
                             </Button>
                           )}
                         </div>

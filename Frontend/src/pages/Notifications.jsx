@@ -1,12 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { Bell, CheckCircle2, XCircle, Clock, Trophy, UserPlus, AlertCircle, FileText, RefreshCw } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Bell, CheckCircle2, XCircle, Clock, Trophy, UserPlus, AlertCircle, FileText } from "lucide-react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
-import { API_BASE_URL } from "@/lib/api";
+import { API_BASE_URL, fetchJsonCached, invalidateApiCache } from "@/lib/api";
 
-const mapType = (t) => {
+const isParticipationDecisionNotification = (t, title = "", message = "") => {
+  const combined = `${title || ""} ${message || ""}`.toLowerCase();
+  if (t === "REJECTION" || t === "ROLLBACK") return true;
+  if (t === "GENERAL" && combined.includes("participation")) return true;
+  return false;
+};
+
+const mapType = (t, title = "", message = "") => {
   switch (t) {
     case "ACHIEVEMENT_EARNED":
       return { type: "achievement", status: "approved" };
@@ -16,14 +24,32 @@ const mapType = (t) => {
       return { type: "achievement", status: "rejected" };
     case "ROLLBACK":
       return { type: "achievement", status: "pending" };
+    case "GENERAL":
+      if (isParticipationDecisionNotification(t, title, message)) {
+        if (`${title} ${message}`.toLowerCase().includes("approved")) {
+          return { type: "achievement", status: "approved" };
+        }
+        if (`${title} ${message}`.toLowerCase().includes("rejected")) {
+          return { type: "achievement", status: "rejected" };
+        }
+        return { type: "approval" };
+      }
+      return { type: "system" };
     case "EXTERNAL_PARTICIPATION_SUBMITTED":
       return { type: "approval" };
     case "TEAM_INVITATION":
     case "TEAM_CONFIRMATION":
       return { type: "team" };
     case "SUBMISSION_SUCCESS":
+    case "SUBMISSION_RECEIVED":
+    case "SUBMISSION_OPEN":
+    case "SUBMISSION_DEADLINE_PASSED":
+    case "SUBMISSION_EVALUATED":
       return { type: "submission" };
     case "COMPETITION_CREATED":
+    case "COMPETITION_UPDATED":
+    case "COMPETITION_REGISTRATION_OPEN":
+    case "COMPETITION_REGISTRATION_CLOSED":
       return { type: "deadline" };
     default:
       return { type: "system" };
@@ -60,14 +86,70 @@ const bgColors = {
   system: "bg-muted",
 };
 
+const resolveNotificationRoute = (rawType, relatedEntityId, role) => {
+  switch (rawType) {
+    case "COMPETITION_CREATED":
+    case "COMPETITION_UPDATED":
+    case "COMPETITION_REGISTRATION_OPEN":
+    case "COMPETITION_REGISTRATION_CLOSED":
+      return relatedEntityId ? `/competitions/${relatedEntityId}` : "/competitions";
+    case "TEAM_INVITATION":
+    case "TEAM_CONFIRMATION":
+      return "/teams";
+    case "SUBMISSION_OPEN":
+    case "SUBMISSION_SUCCESS":
+    case "SUBMISSION_RECEIVED":
+    case "SUBMISSION_DEADLINE_PASSED":
+    case "SUBMISSION_EVALUATED":
+      if (role === "teacher") {
+        return relatedEntityId
+          ? `/teacher/submissions?competition=${encodeURIComponent(relatedEntityId)}`
+          : "/teacher/submissions";
+      }
+      return "/submissions";
+    case "EXTERNAL_PARTICIPATION_SUBMITTED":
+      return role === "admin" ? "/admin/approvals" : "/my-external-competitions";
+    case "REJECTION":
+    case "ROLLBACK":
+      return role === "admin" ? "/admin/approvals" : "/submissions";
+    default:
+      return "";
+  }
+};
+
+const formatDateTimeLabel = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("en-US", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+};
+
+const toTimestamp = (value) => {
+  if (!value) return 0;
+  const date = new Date(value);
+  const time = date.getTime();
+  return Number.isNaN(time) ? 0 : time;
+};
+
 export default function Notifications() {
+  const navigate = useNavigate();
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(false);
-  const role = typeof window !== "undefined" ? (localStorage.getItem("userRole") || "student") : "student";
+  const role = typeof window !== "undefined"
+    ? String(localStorage.getItem("userRole") || "student").toLowerCase().replace("role_", "")
+    : "student";
 
   const unreadCount = useMemo(() => notifications.filter(n => !n.read).length, [notifications]);
 
-  const loadNotifications = async () => {
+  const loadNotifications = async ({ force = false } = {}) => {
     const token = localStorage.getItem("userToken");
     if (!token) {
       toast.error("Not authenticated");
@@ -75,23 +157,34 @@ export default function Notifications() {
     }
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/api/notifications`, {
-        headers: { Authorization: `Bearer ${token}` }
+      const data = await fetchJsonCached(`${API_BASE_URL}/api/notifications`, {
+        token,
+        ttlMs: 120000,
+        force,
+        cacheKey: "notifications:list",
       });
-      if (!res.ok) throw new Error("Failed to load notifications");
-      const data = await res.json().catch(() => []);
       const normalized = (Array.isArray(data) ? data : []).map((n) => {
-        const mapped = mapType(n.type);
+        const mapped = mapType(n.type, n.title, n.message);
+        const route = isParticipationDecisionNotification(n.type, n.title, n.message)
+          ? (role === "admin" ? "/admin/approvals" : "/submissions")
+          : resolveNotificationRoute(n.type, n.relatedEntityId, role);
         return {
           id: n.id,
+          rawType: n.type,
+          relatedEntityId: n.relatedEntityId,
           type: mapped.type,
           status: mapped.status,
           title: n.title || "Notification",
           message: n.message || "",
           read: !!n.read || !!n.isRead,
-          time: n.createdAt ? new Date(n.createdAt).toLocaleString() : "",
+          time: formatDateTimeLabel(n.createdAt),
+          createdAtRaw: n.createdAt || null,
+          route,
         };
       });
+      normalized.sort((first, second) =>
+        toTimestamp(second.createdAtRaw) - toTimestamp(first.createdAtRaw)
+      );
       setNotifications(normalized);
     } catch (e) {
       toast.error(e.message || "Failed to load notifications");
@@ -101,7 +194,12 @@ export default function Notifications() {
   };
 
   useEffect(() => {
-    loadNotifications();
+    loadNotifications({ force: false });
+    const handleNotificationRefresh = () => loadNotifications({ force: false });
+    window.addEventListener("notifications:updated", handleNotificationRefresh);
+    return () => {
+      window.removeEventListener("notifications:updated", handleNotificationRefresh);
+    };
   }, []);
 
   const markAsRead = async (id) => {
@@ -115,7 +213,15 @@ export default function Notifications() {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}` }
       });
+      invalidateApiCache((key) => String(key).includes("notifications"));
     } catch {}
+  };
+
+  const handleNotificationClick = async (notification) => {
+    await markAsRead(notification.id);
+    if (notification.route) {
+      navigate(notification.route);
+    }
   };
 
   const markAllAsRead = async () => {
@@ -127,6 +233,7 @@ export default function Notifications() {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}` }
       });
+      invalidateApiCache((key) => String(key).includes("notifications"));
     } catch {}
   };
 
@@ -150,10 +257,6 @@ export default function Notifications() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={loadNotifications} disabled={loading}>
-              <RefreshCw className={cn("w-4 h-4 mr-2", loading && "animate-spin")} />
-              Refresh
-            </Button>
             <Button size="sm" onClick={markAllAsRead} disabled={notifications.length === 0 || unreadCount === 0}>
               Mark all read
             </Button>
@@ -177,7 +280,7 @@ export default function Notifications() {
                     "w-full text-left p-4 hover:bg-muted/40 transition-colors",
                     !n.read && "bg-secondary/5"
                   )}
-                  onClick={() => markAsRead(n.id)}
+                  onClick={() => handleNotificationClick(n)}
                 >
                   <div className="flex items-start gap-3">
                     <div className={cn("w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0", bgColors[n.type] || "bg-muted")}>

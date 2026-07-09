@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { 
+import { useEffect, useMemo, useState } from "react";
+import {
   MessageSquare, Trash2, EyeOff, AlertTriangle, Search,
   Filter, Eye, User, Clock, Heart, MoreVertical,
   Shield, CheckCircle2, Bot, Trophy, Medal, Star
@@ -30,144 +30,215 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { API_BASE_URL, fetchJsonCached } from "@/lib/api";
+import { formatTimeAgo } from "@/lib/date";
 import { toast } from "sonner";
 
-const mockPosts = [
-  {
-    id: 1,
-    type: "achievement",
-    author: "AcademiX System",
-    avatar: "🏆",
-    content: "Congratulations to Emily Chen for securing 2nd place at the National Coding Championship! 🏆",
-    achievement: {
-      title: "2nd Place",
-      competition: "National Coding Championship 2024",
-      winner: "Emily Chen",
-      rank: "Silver",
-    },
-    likes: 45,
-    comments: [
-      { id: 1, author: "James Wilson", content: "Congratulations Emily! Well deserved!", time: "2 hours ago", hidden: false },
-      { id: 2, author: "Sofia Rodriguez", content: "Amazing achievement! 🎉", time: "1 hour ago", hidden: false },
-    ],
-    time: "3 hours ago",
-    status: "published",
-    reportCount: 0,
-  },
-  {
-    id: 2,
-    type: "achievement",
-    author: "AcademiX System",
-    avatar: "🏆",
-    content: "Alex Park has successfully completed the AI Innovation Challenge. Remarkable effort!",
-    achievement: {
-      title: "Runner-up",
-      competition: "AI Innovation Challenge",
-      winner: "Alex Park",
-      rank: "Bronze",
-    },
-    likes: 32,
-    comments: [
-      { id: 1, author: "Anonymous User", content: "This is a comment", time: "30 mins ago", hidden: false },
-    ],
-    time: "5 hours ago",
-    status: "published",
-    reportCount: 1,
-  },
-  {
-    id: 3,
-    type: "achievement",
-    author: "AcademiX System",
-    avatar: "🏆",
-    content: "Maria Santos participated in the Tech Leadership Seminar. Keep learning!",
-    achievement: {
-      title: "Participation",
-      competition: "Tech Leadership Seminar",
-      winner: "Maria Santos",
-      rank: "Participant",
-    },
-    likes: 18,
-    comments: [],
-    time: "1 day ago",
-    status: "published",
-    reportCount: 0,
-  },
-];
+const fallbackPosts = [];
+
+const mapPostFromApi = (post) => ({
+  id: post.id,
+  type: "achievement",
+  author: post.author || "AcademiX System",
+  avatar: post.avatar || "T",
+  content: post.content || "",
+  achievement: post.achievement
+    ? {
+      title: post.achievement.title || "Achievement",
+      competition: post.achievement.competition || "Competition",
+      winner: post.achievement.winner || "Student",
+      rank: post.achievement.rank || "Participant",
+    }
+    : null,
+  likes: Number(post.likes || 0),
+  comments: (Array.isArray(post.comments) ? post.comments : []).map((comment) => ({
+    id: comment.id,
+    author: comment.author || "Student",
+    content: comment.text || "",
+    time: formatTimeAgo(comment.createdAt),
+    hidden: comment.hidden || false,
+  })),
+  time: formatTimeAgo(post.createdAt),
+  status: post.status || "published",
+  reportCount: 0,
+});
 
 export default function AdminSocialModeration() {
-  const [posts, setPosts] = useState(mockPosts);
+  const [posts, setPosts] = useState(fallbackPosts);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
   const [selectedPost, setSelectedPost] = useState(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
 
-  const filteredPosts = posts.filter((post) => {
-    const matchesSearch = post.author.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      post.content.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesStatus = filterStatus === "all" || post.status === filterStatus;
-    return matchesSearch && matchesStatus;
-  });
+  useEffect(() => {
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      setPosts(fallbackPosts);
+      return;
+    }
+
+    let mounted = true;
+    const load = async () => {
+      try {
+        const data = await fetchJsonCached(`${API_BASE_URL}/api/social-feed/admin/posts`, {
+          token,
+          ttlMs: 60000,
+          cacheKey: "admin:social-feed:moderation:posts",
+        });
+        if (!mounted) return;
+        const mapped = (Array.isArray(data) ? data : []).map((post) => ({
+          id: post.id,
+          type: "achievement",
+          author: post.author || "AcademiX System",
+          avatar: post.avatar || "🏆",
+          content: post.content || "",
+          achievement: post.achievement
+            ? {
+              title: post.achievement.title || "Achievement",
+              competition: post.achievement.competition || "Competition",
+              winner: post.achievement.winner || "Student",
+              rank: post.achievement.rank || "Participant",
+            }
+            : null,
+          likes: Number(post.likes || 0),
+          comments: (Array.isArray(post.comments) ? post.comments : []).map((comment) => ({
+            id: comment.id,
+            author: comment.author || "Student",
+            content: comment.text || "",
+            time: formatTimeAgo(comment.createdAt),
+            hidden: comment.hidden || false,
+          })),
+          time: formatTimeAgo(post.createdAt),
+status: post.status || "published",          reportCount: 0,
+        }));
+        setPosts(mapped.length > 0 ? mapped : fallbackPosts);
+      } catch (error) {
+        toast.error(error?.message || "Failed to load social feed.");
+        setPosts(fallbackPosts);
+      }
+    };
+
+    load();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Refresh moderation view when social feed changes (likes/comments)
+  useEffect(() => {
+    const handler = () => {
+      const token = localStorage.getItem("userToken");
+      if (!token) return;
+      fetchJsonCached(`${API_BASE_URL}/api/social-feed/admin/posts`, {
+        token,
+        ttlMs: 60000,
+        force: true,
+        cacheKey: "admin:social-feed:moderation:posts",
+      })
+        .then((data) => {
+          const mapped = (Array.isArray(data) ? data : []).map((post) => ({
+            id: post.id,
+            type: "achievement",
+            author: post.author || "AcademiX System",
+            avatar: post.avatar || "🏆",
+            content: post.content || "",
+            achievement: post.achievement
+              ? {
+                title: post.achievement.title || "Achievement",
+                competition: post.achievement.competition || "Competition",
+                winner: post.achievement.winner || "Student",
+                rank: post.achievement.rank || "Participant",
+              }
+              : null,
+            likes: Number(post.likes || 0),
+            comments: (Array.isArray(post.comments) ? post.comments : []).map((comment) => ({
+              id: comment.id,
+              author: comment.author || "Student",
+              content: comment.text || "",
+              time: formatTimeAgo(comment.createdAt),
+              hidden: comment.hidden || false,
+            })),
+            time: formatTimeAgo(post.createdAt),
+status: post.status || "published",            reportCount: 0,
+          }));
+          setPosts(mapped.length > 0 ? mapped : fallbackPosts);
+        })
+        .catch(() => { });
+    };
+    window.addEventListener("social:updated", handler);
+    return () => window.removeEventListener("social:updated", handler);
+  }, []);
+
+  const filteredPosts = useMemo(
+    () =>
+      posts.filter((post) => {
+        const matchesSearch =
+          String(post.author || "")
+            .toLowerCase()
+            .includes(searchQuery.toLowerCase()) ||
+          String(post.content || "")
+            .toLowerCase()
+            .includes(searchQuery.toLowerCase());
+        const matchesStatus = filterStatus === "all" || post.status === filterStatus;
+        return matchesSearch && matchesStatus;
+      }),
+    [posts, searchQuery, filterStatus]
+  );
 
   const hiddenCount = posts.filter(p => p.status === "hidden").length;
 
-  const handleHidePost = (id) => {
-    setPosts(prev => prev.map(post => 
-      post.id === id ? { ...post, status: "hidden" } : post
-    ));
-    toast.success("Post hidden from public view");
+  const handleHidePost = async (id) => {
+    await fetch(`${API_BASE_URL}/api/social-feed/admin/posts/${id}/hide`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${localStorage.getItem("userToken")}` }
+    });
+    window.dispatchEvent(new Event("social:updated"));
+    toast.success("Post hidden");
   };
 
-  const handleRestorePost = (id) => {
-    setPosts(prev => prev.map(post => 
-      post.id === id ? { ...post, status: "published", reportCount: 0 } : post
-    ));
+  const handleRestorePost = async (id) => {
+    await fetch(`${API_BASE_URL}/api/social-feed/admin/posts/${id}/restore`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${localStorage.getItem("userToken")}` }
+    });
+    window.dispatchEvent(new Event("social:updated"));
     toast.success("Post restored");
   };
 
-  const handleDeletePost = (id) => {
-    setPosts(prev => prev.filter(post => post.id !== id));
-    toast.success("Post permanently deleted");
-    setIsDetailOpen(false);
+  const handleDeletePost = async (id) => {
+    await fetch(`${API_BASE_URL}/api/social-feed/admin/posts/${id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${localStorage.getItem("userToken")}` }
+    });
+    window.dispatchEvent(new Event("social:updated"));
+    toast.success("Post deleted permanently");
+  };
+  const handleHideComment = async (postId, commentId) => {
+    await fetch(`${API_BASE_URL}/api/social-feed/admin/posts/${postId}/comments/${commentId}/hide`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${localStorage.getItem("userToken")}` }
+    });
+    window.dispatchEvent(new Event("social:updated"));
+    toast.success("Comment hidden");
   };
 
-  const handleDeleteComment = (postId, commentId) => {
-    setPosts(prev => prev.map(post => 
-      post.id === postId 
-        ? { ...post, comments: post.comments.filter(c => c.id !== commentId) }
-        : post
-    ));
-    toast.success("Comment deleted");
-  };
-
-  const handleHideComment = (postId, commentId) => {
-    setPosts(prev => prev.map(post => 
-      post.id === postId 
-        ? { 
-            ...post, 
-            comments: post.comments.map(c => 
-              c.id === commentId ? { ...c, hidden: true } : c
-            ) 
-          }
-        : post
-    ));
-    toast.success("Comment hidden from public view");
-  };
-
-  const handleRestoreComment = (postId, commentId) => {
-    setPosts(prev => prev.map(post => 
-      post.id === postId 
-        ? { 
-            ...post, 
-            comments: post.comments.map(c => 
-              c.id === commentId ? { ...c, hidden: false } : c
-            ) 
-          }
-        : post
-    ));
+  const handleRestoreComment = async (postId, commentId) => {
+    await fetch(`${API_BASE_URL}/api/social-feed/admin/posts/${postId}/comments/${commentId}/restore`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${localStorage.getItem("userToken")}` }
+    });
+    window.dispatchEvent(new Event("social:updated"));
     toast.success("Comment restored");
   };
 
-
+  const handleDeleteComment = async (postId, commentId) => {
+    await fetch(`${API_BASE_URL}/api/social-feed/admin/posts/${postId}/comments/${commentId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${localStorage.getItem("userToken")}` }
+    });
+    window.dispatchEvent(new Event("social:updated"));
+    toast.success("Comment deleted");
+  };
 
   return (
     <AppLayout role="admin">
@@ -187,7 +258,7 @@ export default function AdminSocialModeration() {
         {/* Info Banner */}
         <div className="p-4 rounded-lg bg-info/5 border border-info/20">
           <p className="text-sm text-info">
-            <strong>Note:</strong> Social feed only contains system-generated achievement posts. 
+            <strong>Note:</strong> Social feed only contains system-generated achievement posts.
             Students can like and comment, but cannot create posts. You can hide or delete inappropriate posts and comments.
           </p>
         </div>
@@ -231,8 +302,8 @@ export default function AdminSocialModeration() {
         {/* Posts List */}
         <div className="space-y-4">
           {filteredPosts.map((post) => (
-            <div 
-              key={post.id} 
+            <div
+              key={post.id}
               className={cn(
                 "card-static p-5",
                 post.status === "flagged" && "border-warning/30 bg-warning/5",
@@ -263,7 +334,7 @@ export default function AdminSocialModeration() {
 
                   {post.achievement && (
                     <div className="bg-muted/50 rounded-lg p-3 mb-3 inline-flex items-center gap-3">
-                       <div className={cn(
+                      <div className={cn(
                         "w-10 h-10 rounded-lg flex items-center justify-center",
                         post.achievement.rank === "Gold" && "bg-yellow-100 text-yellow-600",
                         post.achievement.rank === "Silver" && "bg-slate-100 text-slate-600",
@@ -298,7 +369,7 @@ export default function AdminSocialModeration() {
                     <div className="mt-4 pt-4 border-t border-border space-y-2">
                       <p className="text-xs font-medium text-muted-foreground">Comments:</p>
                       {post.comments.slice(0, 3).map((comment) => (
-                        <div 
+                        <div
                           key={comment.id}
                           className={cn(
                             "flex items-start justify-between p-2 rounded",
@@ -332,7 +403,7 @@ export default function AdminSocialModeration() {
                                   Hide Comment
                                 </DropdownMenuItem>
                               )}
-                              <DropdownMenuItem 
+                              <DropdownMenuItem
                                 className="text-destructive"
                                 onClick={() => handleDeleteComment(post.id, comment.id)}
                               >
@@ -348,8 +419,8 @@ export default function AdminSocialModeration() {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     size="sm"
                     onClick={() => {
                       setSelectedPost(post);
@@ -377,7 +448,7 @@ export default function AdminSocialModeration() {
                         </DropdownMenuItem>
                       )}
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem 
+                      <DropdownMenuItem
                         className="text-destructive"
                         onClick={() => handleDeletePost(post.id)}
                       >
@@ -417,8 +488,8 @@ export default function AdminSocialModeration() {
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                       <p className="font-semibold">{selectedPost.author}</p>
-                       <span className="badge-status bg-primary/10 text-primary text-xs flex items-center gap-1">
+                      <p className="font-semibold">{selectedPost.author}</p>
+                      <span className="badge-status bg-primary/10 text-primary text-xs flex items-center gap-1">
                         <Bot className="w-3 h-3" />
                         System
                       </span>
@@ -463,14 +534,14 @@ export default function AdminSocialModeration() {
                     <MessageSquare className="w-4 h-4" />
                     <span>{selectedPost.comments.length} comments</span>
                   </div>
-                  </div>
+                </div>
 
                 {selectedPost.comments.length > 0 && (
                   <div>
                     <p className="font-medium mb-2">All Comments:</p>
                     <div className="space-y-2 max-h-48 overflow-y-auto">
                       {selectedPost.comments.map((comment) => (
-                        <div 
+                        <div
                           key={comment.id}
                           className={cn(
                             "flex items-start justify-between p-3 rounded-lg",
@@ -507,7 +578,7 @@ export default function AdminSocialModeration() {
                                   Hide Comment
                                 </DropdownMenuItem>
                               )}
-                              <DropdownMenuItem 
+                              <DropdownMenuItem
                                 className="text-destructive"
                                 onClick={() => handleDeleteComment(selectedPost.id, comment.id)}
                               >
@@ -524,23 +595,23 @@ export default function AdminSocialModeration() {
 
                 <DialogFooter>
                   {selectedPost.status !== "hidden" ? (
-                    <Button 
-                      variant="outline" 
+                    <Button
+                      variant="outline"
                       onClick={() => handleHidePost(selectedPost.id)}
                     >
                       <EyeOff className="w-4 h-4 mr-2" />
                       Hide Post
                     </Button>
                   ) : (
-                    <Button 
-                      variant="outline" 
+                    <Button
+                      variant="outline"
                       onClick={() => handleRestorePost(selectedPost.id)}
                     >
                       <Eye className="w-4 h-4 mr-2" />
                       Restore Post
                     </Button>
                   )}
-                  <Button 
+                  <Button
                     variant="destructive"
                     onClick={() => handleDeletePost(selectedPost.id)}
                   >

@@ -6,12 +6,15 @@ import com.project.Backend.CompetitionRegistration.RegistrationStatus;
 
 public record CompetitionRegistrationResponseDTO(
 
-                String id,
-                String competitionId,
+        String id,
+        String competitionId,
 
-                String studentId,
-                String teamId,
+        String studentId,
+        String teamId,
 
-                RegistrationStatus status,
-                LocalDateTime registeredAt) {
+        String username,
+        String email,
+
+        RegistrationStatus status,
+        LocalDateTime registeredAt) {
 }

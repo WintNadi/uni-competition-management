@@ -1,6 +1,7 @@
 package com.project.Backend.Evaluation;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 
 import org.springframework.stereotype.Component;
 
@@ -14,6 +15,7 @@ public class EvaluationMapper {
         return Evaluation.builder()
                 .marksAwarded(dto.marksAwarded())
                 .feedback(dto.feedback())
+                .questionScores(dto.questionScores() == null ? null : new ArrayList<>(dto.questionScores()))
                 .evaluatedAt(LocalDateTime.now()) // set timestamp automatically
                 .build();
     }
@@ -24,6 +26,7 @@ public class EvaluationMapper {
         return new EvaluationResponseDTO(
                 evaluation.getMarksAwarded(),
                 evaluation.getFeedback(),
+                evaluation.getQuestionScores(),
                 evaluation.getEvaluatedAt());
     }
 }

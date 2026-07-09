@@ -1,5 +1,6 @@
 package com.project.Backend.User;
 
+import com.project.Backend.Auth.Role;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.mapping.Document;
 

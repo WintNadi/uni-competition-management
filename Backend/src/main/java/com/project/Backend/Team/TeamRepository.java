@@ -9,6 +9,8 @@ public interface TeamRepository extends MongoRepository<Team, String> {
 
     List<Team> findByCompetitionId(String competitionId);
 
+    void deleteByCompetitionId(String competitionId);
+
     List<Team> findByCompetitionIdAndAcceptedMemberIdsContaining(String competitionId, String memberId);
 
     List<Team> findByCompetitionIdAndLeaderId(String competitionId, String leaderId);

@@ -3,6 +3,7 @@ package com.project.Backend.CompetitionRegistration;
 import java.time.LocalDateTime;
 
 import com.project.Backend.CompetitionRegistration.ResponseDTO.CompetitionRegistrationResponseDTO;
+import com.project.Backend.User.User;
 
 public class CompetitionRegistrationMapper {
 
@@ -36,12 +37,15 @@ public class CompetitionRegistrationMapper {
         }
 
         public static CompetitionRegistrationResponseDTO toResponse(
-                        CompetitionRegistration r) {
+                        CompetitionRegistration r, User user) {
+
                 return new CompetitionRegistrationResponseDTO(
                                 r.getId(),
                                 r.getCompetitionId(),
                                 r.getStudentId(),
                                 r.getTeamId(),
+                                user != null ? user.getUsername() : null,
+                                user != null ? user.getEmail() : null,
                                 r.getStatus(),
                                 r.getRegisteredAt());
         }

@@ -11,6 +11,11 @@ public class TeamMapper {
                 team.getLeaderId(),
                 team.getInvitedMemberIds(),
                 team.getAcceptedMemberIds(),
+                team.getPendingJoinRequestIds(),
+                null,
+                null,
+                null,
+                null,
                 team.getStatus().name());
     }
 }

@@ -29,4 +29,6 @@ public interface SubmissionRepository extends MongoRepository<Submission, String
 
         Optional<Submission> findBySubmissionId(String submissionId);
 
+        long countByCompetitionId(String competitionId);
+
 }

@@ -1,6 +1,7 @@
 package com.project.Backend.CompetitionRegistration;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 import org.springframework.stereotype.Service;
 
@@ -11,6 +12,8 @@ import com.project.Backend.CompetitionRegistration.ResponseDTO.CompetitionRegist
 import com.project.Backend.Team.Team;
 import com.project.Backend.Team.TeamRepository;
 import com.project.Backend.Team.TeamStatus;
+import com.project.Backend.User.User;
+import com.project.Backend.User.UserRepository;
 
 import lombok.RequiredArgsConstructor;
 
@@ -21,6 +24,7 @@ public class CompetitionRegistrationService {
         private final CompetitionRepository competitionRepository;
         private final CompetitionRegistrationRepository registrationRepository;
         private final TeamRepository teamRepository;
+        private final UserRepository userRepository;
 
         public CompetitionRegistrationResponseDTO register(
                         CompetitionRegistrationRequestDTO dto,
@@ -32,10 +36,12 @@ public class CompetitionRegistrationService {
                 Competition competition = competitionRepository.findById(dto.competitionId())
                                 .orElseThrow(() -> new IllegalArgumentException("Competition not found"));
 
-                if (competition.getRegistrationDeadline() != null
-                                && LocalDateTime.now().isAfter(competition.getRegistrationDeadline())) {
-                        throw new IllegalStateException("Registration deadline passed");
+                if (!"EXTERNAL".equalsIgnoreCase(competition.getCompetitionType())
+                                && !"INTERNAL".equalsIgnoreCase(competition.getCompetitionType())) {
+                        throw new IllegalStateException("Unsupported competition type");
                 }
+
+                validateRegistrationWindow(competition);
 
                 String type = competition.getParticipationType();
                 if (type == null || type.isBlank()) {
@@ -59,8 +65,10 @@ public class CompetitionRegistrationService {
                                         dto.competitionId(),
                                         studentId);
 
-                        return CompetitionRegistrationMapper.toResponse(
-                                        registrationRepository.save(reg));
+                        CompetitionRegistration savedReg = registrationRepository.save(reg);
+                        User user = userRepository.findById(studentId).orElse(null);
+
+                        return CompetitionRegistrationMapper.toResponse(savedReg, user);
                 }
 
                 if (!"TEAM".equalsIgnoreCase(type)) {
@@ -96,7 +104,52 @@ public class CompetitionRegistrationService {
                                 dto.competitionId(),
                                 team.getTeamId());
 
-                return CompetitionRegistrationMapper.toResponse(
-                                registrationRepository.save(reg));
+                CompetitionRegistration savedReg = registrationRepository.save(reg);
+                User user = userRepository.findById(team.getLeaderId()).orElse(null);
+
+                return CompetitionRegistrationMapper.toResponse(savedReg, user);
+        }
+
+        public List<CompetitionRegistrationResponseDTO> getRegisteredStudents(String competitionId) {
+
+                return registrationRepository
+                                .findByCompetitionIdAndStatus(
+                                                competitionId,
+                                                RegistrationStatus.REGISTERED)
+                                .stream()
+                                .map(reg -> {
+
+                                        User user = reg.getStudentId() != null
+                                                        ? userRepository.findById(reg.getStudentId()).orElse(null)
+                                                        : null;
+                                        return CompetitionRegistrationMapper.toResponse(reg, user);
+                                })
+                                .toList();
+        }
+
+        private void validateRegistrationWindow(Competition competition) {
+                LocalDateTime now = LocalDateTime.now();
+                LocalDateTime openAt = competition.getRegistrationOpen();
+                LocalDateTime closeAt = resolveRegistrationClose(competition);
+
+                if ("EXTERNAL".equalsIgnoreCase(competition.getCompetitionType())
+                                && (openAt == null || closeAt == null)) {
+                        throw new IllegalStateException("Registration schedule is not set for this competition");
+                }
+
+                if (openAt != null && now.isBefore(openAt)) {
+                        throw new IllegalStateException("Registration is not open yet");
+                }
+
+                if (closeAt != null && now.isAfter(closeAt)) {
+                        throw new IllegalStateException("Registration is closed");
+                }
+        }
+
+        private LocalDateTime resolveRegistrationClose(Competition competition) {
+                if (competition.getRegistrationClose() != null) {
+                        return competition.getRegistrationClose();
+                }
+                return competition.getRegistrationDeadline();
         }
 }

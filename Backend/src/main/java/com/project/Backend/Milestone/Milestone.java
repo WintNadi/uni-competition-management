@@ -16,7 +16,7 @@ import lombok.NoArgsConstructor;
 public class Milestone {
     @Id
     private String milestoneId;
-    private String userId;
+    private String studentId;
     private String title;
     private String achievedAt;
     private Integer points;

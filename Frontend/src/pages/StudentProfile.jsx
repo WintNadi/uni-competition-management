@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { resolveFileUrl } from "@/lib/api";
+import { API_BASE_URL, fetchJsonCached, invalidateApiCache, resolveFileUrl } from "@/lib/api";
 
 export default function StudentProfile() {
   const navigate = useNavigate();
@@ -27,19 +27,12 @@ export default function StudentProfile() {
       return;
     }
     setLoading(true);
-    fetch("http://localhost:8081/api/users/me", {
-      headers: { Authorization: `Bearer ${token}` }
+    fetchJsonCached(`${API_BASE_URL}/api/users/me`, {
+      token,
+      ttlMs: 180000,
+      cacheKey: "users:me",
     })
-      .then(async (res) => {
-        if (!res.ok) {
-          if (res.status === 401) {
-            toast.error("Not authenticated");
-            return;
-          }
-          toast.error(`Failed to load profile (${res.status})`);
-          return;
-        }
-        const data = await res.json().catch(() => ({}));
+      .then((data) => {
         if (data) {
           setForm({
             fullName: data.fullName || "",
@@ -52,8 +45,8 @@ export default function StudentProfile() {
           });
         }
       })
-      .catch(() => {
-        toast.error("Failed to load profile: network error");
+      .catch((error) => {
+        toast.error(error?.message || "Failed to load profile");
       })
       .finally(() => setLoading(false));
   }, []);
@@ -68,7 +61,7 @@ export default function StudentProfile() {
     if (!token) return toast.error("Not authenticated");
     setLoading(true);
     try {
-      const res = await fetch("http://localhost:8081/api/users/me", {
+      const res = await fetch(`${API_BASE_URL}/api/users/me`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -93,6 +86,7 @@ export default function StudentProfile() {
       } else {
         localStorage.removeItem("userAvatarUrl");
       }
+      invalidateApiCache((key) => String(key).includes("users:me"));
       window.dispatchEvent(
         new CustomEvent("profile:avatar-updated", { detail: { avatarUrl: form.avatarUrl || "" } })
       );
@@ -141,7 +135,7 @@ export default function StudentProfile() {
                   const fd = new FormData();
                   fd.append("file", file);
                   try {
-                    const res = await fetch("http://localhost:8081/api/users/me/avatar", {
+                    const res = await fetch(`${API_BASE_URL}/api/users/me/avatar`, {
                       method: "POST",
                       headers: { Authorization: `Bearer ${token}` },
                       body: fd
@@ -152,6 +146,7 @@ export default function StudentProfile() {
                       const avatarUrl = data.message;
                       setForm((prev) => ({ ...prev, avatarUrl }));
                       localStorage.setItem("userAvatarUrl", avatarUrl);
+                      invalidateApiCache((key) => String(key).includes("users:me"));
                       window.dispatchEvent(
                         new CustomEvent("profile:avatar-updated", { detail: { avatarUrl } })
                       );

@@ -14,7 +14,6 @@ import {
   FileText,
   Shield,
   Menu,
-  Settings,
   Award,
   Mail,
 } from "lucide-react";
@@ -49,7 +48,6 @@ const adminNavItems = [
   { icon: Award, label: "Social Feed", path: "/admin/social" },
   { icon: BarChart3, label: "Leaderboard", path: "/admin/leaderboard" },
   { icon: FileText, label: "Reports", path: "/admin/reports" },
-  { icon: Settings, label: "Settings", path: "/admin/settings" },
 ];
 
 const roleNavItems = {

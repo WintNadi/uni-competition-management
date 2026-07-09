@@ -2,47 +2,34 @@ import { useEffect, useRef, useState } from "react";
 import { 
   Upload, FileText, Link as LinkIcon, Clock, CheckCircle2, 
   XCircle, AlertCircle, Eye, Download, ExternalLink, Shield, X,
-  HelpCircle, CheckSquare, Edit3, Play, Award, Globe
+  HelpCircle, CheckSquare, Play, Award, Globe
 } from "lucide-react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { API_BASE_URL } from "@/lib/api";
+import { API_BASE_URL, fetchJsonCached, invalidateApiCache, resolveFileUrl } from "@/lib/api";
 import { QuizAttempt } from "@/components/quiz/QuizAttempt";
 import { toast } from "sonner";
 
-// Generate more quiz questions for pagination demo (30 questions)
-const generateQuizQuestions = () => {
-  const questions = [];
-  for (let i = 1; i <= 30; i++) {
-    if (i % 3 === 1) {
-      questions.push({
-        id: i,
-        type: "mcq",
-        question: `Question ${i}: Which of the following is correct about data structures?`,
-        options: ["A. Arrays have O(1) access time", "B. Linked lists have O(1) access time", "C. Both have same access time", "D. Neither has O(1) access time"],
-        answer: null,
-      });
-    } else if (i % 3 === 2) {
-      questions.push({
-        id: i,
-        type: "truefalse",
-        question: `Question ${i}: JavaScript is a statically typed language.`,
-        options: ["True", "False"],
-        answer: null,
-      });
-    } else {
-      questions.push({
-        id: i,
-        type: "fillblank",
-        question: `Question ${i}: In Python, the _____ keyword is used to define a function.`,
-        options: null,
-        answer: null,
-      });
-    }
+const mapQuestionTypeFromBackend = (value) => {
+  const normalized = String(value || "").toUpperCase();
+  if (normalized === "MCQ" || normalized === "MULTIPLE_CHOICE") return "mcq";
+  if (normalized === "TRUEFALSE" || normalized === "TRUE_FALSE") return "truefalse";
+  if (normalized === "FILLBLANK" || normalized === "FILL_BLANK" || normalized === "FILL_IN_BLANK") {
+    return "fillblank";
   }
-  return questions;
+  return "mcq";
 };
+
+const normalizeQuizQuestions = (questions) =>
+  (Array.isArray(questions) ? questions : []).map((question, index) => ({
+    id: question.id || question.questionId || index + 1,
+    type: mapQuestionTypeFromBackend(question.type || question.questionType),
+    question: question.question || "",
+    options: Array.isArray(question.options) ? question.options : null,
+    marks: Number(question.marks) || 0,
+    answer: null,
+  }));
 
 const participationResultOptions = [
   "Winner", "1st Runner Up", "2nd Runner Up", "3rd Place", 
@@ -50,85 +37,21 @@ const participationResultOptions = [
 ];
 
 // External submissions - only appear when admin enables them with deadline
-const mockExternalSubmissions = [
-  {
-    id: 101,
-    competition: "National Coding Championship",
-    organizer: "National Computer Society",
-    scale: "National",
-    deadline: "Apr 10, 2024, 11:59 PM",
-    submittedAt: "Mar 28, 2024, 2:30 PM",
-    status: "pending_approval",
-    files: ["ncc_certificate.pdf", "participation_photo.png"],
-    participationResult: "Top 10",
-    description: "Participated in the national-level programming contest and solved 8 out of 10 problems.",
-    adminEnabled: true,
-    isExternal: true,
-  },
-  {
-    id: 102,
-    competition: "International Math Olympiad",
-    organizer: "International Mathematical Union",
-    scale: "International",
-    deadline: "May 15, 2024, 11:59 PM",
-    submittedAt: null,
-    status: "pending",
-    files: [],
-    participationResult: null,
-    description: "",
-    adminEnabled: true,
-    isExternal: true,
-  },
-  {
-    id: 103,
-    competition: "AWS Cloud Skills Challenge",
-    organizer: "Amazon Web Services",
-    scale: "International",
-    deadline: "Apr 20, 2024, 11:59 PM",
-    submittedAt: "Apr 15, 2024, 3:00 PM",
-    status: "approved",
-    files: ["aws_certificate.pdf"],
-    participationResult: "Finalist",
-    description: "Completed all challenges and earned AWS certification badge.",
-    adminEnabled: true,
-    isExternal: true,
-    adminNote: "Verified with AWS certification database.",
-  },
-  {
-    id: 104,
-    competition: "Google Code Jam Regional",
-    organizer: "Google",
-    scale: "National",
-    deadline: "Dec 30, 2026, 11:59 PM", // Future deadline - student can resubmit
-    submittedAt: "Dec 15, 2026, 10:00 AM",
-    status: "rejected",
-    files: ["gcj_screenshot.png"],
-    participationResult: "Participant",
-    description: "Participated in the regional round.",
-    adminEnabled: true,
-    isExternal: true,
-    adminNote: "Please provide official certificate or results page showing your name.",
-  },
-  {
-    id: 105,
-    competition: "Microsoft Imagine Cup",
-    organizer: "Microsoft",
-    scale: "International",
-    deadline: "Feb 28, 2027, 11:59 PM",
-    submittedAt: null,
-    status: "pending",
-    files: [],
-    participationResult: null,
-    description: "",
-    adminEnabled: true,
-    isExternal: true,
-  },
-];
+const mapExternalSubmissionStatus = (participationStatus, deadline) => {
+  const normalized = String(participationStatus || "").toLowerCase();
+  if (normalized === "approved") return "approved";
+  if (normalized === "rejected") return "rejected";
+  if (normalized === "pending") return "pending_approval";
+  if (!deadline) return "pending";
+  const deadlineDate = new Date(deadline);
+  if (Number.isNaN(deadlineDate.getTime())) return "pending";
+  return deadlineDate < new Date() ? "overdue" : "pending";
+};
 
 const statusConfig = {
   submitted: { icon: CheckCircle2, class: "bg-success/10 text-success", label: "Submitted" },
   pending: { icon: Clock, class: "bg-warning/10 text-warning", label: "Pending" },
-  overdue: { icon: AlertCircle, class: "bg-destructive/10 text-destructive", label: "Overdue" },
+  overdue: { icon: AlertCircle, class: "bg-destructive/10 text-destructive", label: "Finished" },
   pending_approval: { icon: Clock, class: "bg-info/10 text-info", label: "Pending Approval" },
   approved: { icon: CheckCircle2, class: "bg-success/10 text-success", label: "Approved" },
   rejected: { icon: XCircle, class: "bg-destructive/10 text-destructive", label: "Rejected" },
@@ -144,7 +67,89 @@ const submissionTypeLabels = {
 const formatDateTime = (value) => {
   if (!value) return "No deadline";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "No deadline" : date.toLocaleString();
+  return Number.isNaN(date.getTime())
+    ? "No deadline"
+    : date.toLocaleString("en-US", {
+        year: "numeric",
+        month: "numeric",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true,
+      });
+};
+
+const toTimestamp = (value) => {
+  if (!value) return 0;
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const extractDisplayFileName = (fileRef, fallback = "Attachment") => {
+  if (!fileRef || typeof fileRef !== "string") return fallback;
+  const trimmed = fileRef.trim();
+  if (!trimmed) return fallback;
+
+  const cleanStoredFileName = (value) => {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    const proofMatch = text.match(/^proof_[0-9a-fA-F-]{36}_(?:\d+_)?(.+)$/);
+    if (proofMatch?.[1]) {
+      return proofMatch[1];
+    }
+    const genericMatch = text.match(/^(?:avatar|file|upload|material)_[0-9a-fA-F-]{8,}_(.+)$/i);
+    if (genericMatch?.[1]) {
+      return genericMatch[1];
+    }
+    return text;
+  };
+
+  const decode = (value) => {
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return value;
+    }
+  };
+
+  const segments = trimmed.split("/").filter(Boolean);
+  const basicCandidate = cleanStoredFileName(decode(segments[segments.length - 1] || ""));
+  if (basicCandidate && !/^[a-f0-9]{24}$/i.test(basicCandidate)) {
+    return basicCandidate;
+  }
+
+  try {
+    const parsed = new URL(trimmed, window.location.origin);
+    const queryName = parsed.searchParams.get("filename") || parsed.searchParams.get("name");
+    if (queryName) return cleanStoredFileName(decode(queryName));
+
+    const pathSegments = parsed.pathname.split("/").filter(Boolean);
+    if (pathSegments.length >= 4 && pathSegments[0] === "api" && pathSegments[1] === "files") {
+      const withName = cleanStoredFileName(decode(pathSegments.slice(3).join("/")));
+      if (withName) return withName;
+    }
+  } catch {
+    // fall through to fallback
+  }
+
+  return fallback;
+};
+
+const parseFileNameFromDisposition = (value) => {
+  if (!value) return "";
+  const utfMatch = value.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utfMatch?.[1]) {
+    try {
+      return decodeURIComponent(utfMatch[1]);
+    } catch {
+      return utfMatch[1];
+    }
+  }
+  const quotedMatch = value.match(/filename=\"([^\"]+)\"/i);
+  if (quotedMatch?.[1]) return quotedMatch[1];
+  const plainMatch = value.match(/filename=([^;]+)/i);
+  return plainMatch?.[1]?.trim() || "";
 };
 
 const toSubmissionType = (format) => {
@@ -159,22 +164,25 @@ const toSubmissionType = (format) => {
   }
 };
 
-const toQuizAnswerMap = (answers) => {
-  if (!Array.isArray(answers)) return null;
-  return answers.reduce((acc, ans, idx) => {
-    acc[idx + 1] = ans ?? "";
+const toQuizAnswerMapByQuestionId = (answers, questions) => {
+  if (!answers) return {};
+  const questionList = Array.isArray(questions) ? questions : [];
+  return questionList.reduce((acc, question, index) => {
+    const key = question?.id;
+    if (key != null) {
+      acc[key] = answers[index] ?? "";
+    }
     return acc;
   }, {});
 };
 
-const toQuizAnswerList = (answers, totalQuestions) => {
+const toQuizAnswerList = (answers, questions) => {
   if (!answers) return [];
-  const out = Array.from({ length: totalQuestions || 0 }, () => "");
-  Object.entries(answers).forEach(([key, value]) => {
-    const idx = Number(key);
-    if (!Number.isNaN(idx) && idx > 0 && idx <= out.length) {
-      out[idx - 1] = value ?? "";
-    }
+  const questionList = Array.isArray(questions) ? questions : [];
+  const out = questionList.map((question) => {
+    const key = question?.id;
+    if (key == null) return "";
+    return answers[key] ?? "";
   });
   return out;
 };
@@ -193,76 +201,111 @@ export default function Submissions() {
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [selectedSubmission, setSelectedSubmission] = useState(null);
   const [internalSubmissions, setInternalSubmissions] = useState([]);
-  const [externalSubmissions, setExternalSubmissions] = useState(mockExternalSubmissions);
+  const [externalSubmissions, setExternalSubmissions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [uploadedFile, setUploadedFile] = useState(null);
+  const [uploadedProofFiles, setUploadedProofFiles] = useState([]);
   const [repoLink, setRepoLink] = useState("");
   const [showQuizAttempt, setShowQuizAttempt] = useState(false);
   const [viewingQuizAnswers, setViewingQuizAnswers] = useState(null);
-  const [activeTab, setActiveTab] = useState("internal");
+  const [activeTab, setActiveTab] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [internalNote, setInternalNote] = useState("");
   const [participationResult, setParticipationResult] = useState("");
   const [externalDescription, setExternalDescription] = useState("");
   const [currentUserId, setCurrentUserId] = useState(localStorage.getItem("userId") || "");
   const fileInputRef = useRef(null);
+  const hasLoadedDataRef = useRef(false);
+  const skipOwnRefreshEventsRef = useRef(0);
+  const isLoadingDataRef = useRef(false);
+  const pendingReloadRef = useRef(false);
+  const pendingReloadForceRef = useRef(false);
 
-  const loadData = async () => {
-    const token = localStorage.getItem("userToken");
-    if (!token) {
-      setInternalSubmissions([]);
-      setLoadError("Please log in to view submissions.");
-      setLoading(false);
+  const emitRefreshEvents = (...eventNames) => {
+    if (!eventNames.length) return;
+    skipOwnRefreshEventsRef.current += eventNames.length;
+    eventNames.forEach((eventName) => {
+      window.dispatchEvent(new CustomEvent(eventName));
+    });
+  };
+
+  const loadData = async ({ force = false } = {}) => {
+    if (isLoadingDataRef.current) {
+      pendingReloadRef.current = true;
+      pendingReloadForceRef.current = pendingReloadForceRef.current || force;
       return;
     }
 
-    setLoading(true);
+    isLoadingDataRef.current = true;
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      setInternalSubmissions([]);
+      setExternalSubmissions([]);
+      setLoadError("Please log in to view submissions.");
+      hasLoadedDataRef.current = false;
+      setLoading(false);
+      isLoadingDataRef.current = false;
+      return;
+    }
+
+    const shouldShowLoading = !hasLoadedDataRef.current;
+    if (shouldShowLoading) {
+      setLoading(true);
+    }
     setLoadError("");
     try {
-      const [competitionsRes, registrationsRes, submissionsRes, teamsRes, profileRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/competitions`, {
-          headers: { Authorization: `Bearer ${token}` }
+      const cachedUserId = localStorage.getItem("userId") || "";
+      if (cachedUserId) {
+        setCurrentUserId(cachedUserId);
+      }
+      const [competitions, registrations, submissions, teams, profile, externalParticipations] = await Promise.all([
+        fetchJsonCached(`${API_BASE_URL}/competitions`, {
+          token,
+          ttlMs: 300000,
+          force,
+          cacheKey: "competitions:list",
         }),
-        fetch(`${API_BASE_URL}/competitions/registrations/me`, {
-          headers: { Authorization: `Bearer ${token}` }
+        fetchJsonCached(`${API_BASE_URL}/competitions/registrations/me`, {
+          token,
+          ttlMs: 300000,
+          force,
+          cacheKey: "registrations:me",
         }),
-        fetch(`${API_BASE_URL}/submissions`, {
-          headers: { Authorization: `Bearer ${token}` }
+        fetchJsonCached(`${API_BASE_URL}/submissions`, {
+          token,
+          ttlMs: 300000,
+          force,
+          cacheKey: "submissions:me",
         }),
-        fetch(`${API_BASE_URL}/teams/my`, {
-          headers: { Authorization: `Bearer ${token}` }
+        fetchJsonCached(`${API_BASE_URL}/teams/my`, {
+          token,
+          ttlMs: 300000,
+          force,
+          cacheKey: "teams:my",
         }),
-        fetch(`${API_BASE_URL}/api/users/me`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
+        cachedUserId
+          ? Promise.resolve(null)
+          : fetchJsonCached(`${API_BASE_URL}/api/users/me`, {
+              token,
+              ttlMs: 300000,
+              force,
+              cacheKey: "users:me",
+            }).catch(() => null),
+        fetchJsonCached(`${API_BASE_URL}/api/external/participations`, {
+          token,
+          ttlMs: 300000,
+          force,
+          cacheKey: "external:participations:me",
+        }).catch(() => []),
       ]);
 
-      if (!competitionsRes.ok) {
-        throw new Error(await readErrorMessage(competitionsRes));
+      const activeStudentId =
+        profile?.id || cachedUserId || localStorage.getItem("userId") || "";
+      if (profile?.id) {
+        localStorage.setItem("userId", profile.id);
       }
-
-      if (!registrationsRes.ok) {
-        throw new Error(await readErrorMessage(registrationsRes));
-      }
-      if (!submissionsRes.ok) {
-        throw new Error(await readErrorMessage(submissionsRes));
-      }
-      if (!teamsRes.ok) {
-        throw new Error(await readErrorMessage(teamsRes));
-      }
-
-      const competitions = await competitionsRes.json();
-      const registrations = await registrationsRes.json();
-      const submissions = await submissionsRes.json();
-      const teams = await teamsRes.json();
-      if (profileRes.ok) {
-        const profile = await profileRes.json().catch(() => null);
-        if (profile?.id) {
-          localStorage.setItem("userId", profile.id);
-          setCurrentUserId(profile.id);
-        }
-      } else {
-        setCurrentUserId(localStorage.getItem("userId") || "");
-      }
+      setCurrentUserId(activeStudentId);
 
       const competitionMap = new Map(
         (Array.isArray(competitions) ? competitions : []).map((c) => [c.competitionId || c.id, c])
@@ -273,26 +316,69 @@ export default function Submissions() {
       );
 
       const submissionIndex = new Map();
+      const submissionsByCompetition = new Map();
       (Array.isArray(submissions) ? submissions : []).forEach((s) => {
         const key = s.teamId
           ? `${s.competitionId}:${s.teamId}`
           : `${s.competitionId}:IND:${s.submittedBy}`;
         submissionIndex.set(key, s);
+
+        const competitionId = String(s?.competitionId || "");
+        if (!competitionId) return;
+        const bucket = submissionsByCompetition.get(competitionId) || [];
+        bucket.push(s);
+        submissionsByCompetition.set(competitionId, bucket);
       });
 
       const internal = (Array.isArray(registrations) ? registrations : [])
         .map((reg) => {
           const competition = competitionMap.get(reg.competitionId);
           if (!competition) return null;
+          const competitionType = String(competition?.competitionType || competition?.type || "").toUpperCase();
+          if (competitionType.includes("EXTERNAL")) return null;
 
           const isTeam = !!reg.teamId;
           const team = isTeam ? teamMap.get(reg.teamId) : null;
           const submissionType = toSubmissionType(competition.format);
+          const registrationCompetitionId = String(reg?.competitionId || "");
+          const registrationTeamId = String(reg?.teamId || "");
+          const registrationStudentId = String(reg?.studentId || "");
           const submissionKey = isTeam
-            ? `${reg.competitionId}:${reg.teamId}`
-            : `${reg.competitionId}:IND:${reg.studentId}`;
-          const submission = submissionIndex.get(submissionKey);
+            ? `${registrationCompetitionId}:${registrationTeamId}`
+            : `${registrationCompetitionId}:IND:${registrationStudentId}`;
+          let submission = submissionIndex.get(submissionKey);
+
+          // Fallback: endpoint `/submissions` already returns only current student's
+          // submissions (or their team submissions), so this safely recovers matches
+          // when `studentId`/`submittedBy` differ in shape.
+          if (!submission) {
+            const candidates = submissionsByCompetition.get(registrationCompetitionId) || [];
+            if (isTeam) {
+              submission =
+                candidates.find(
+                  (item) => String(item?.teamId || "") === registrationTeamId
+                ) || null;
+            } else {
+              submission =
+                candidates.find((item) => {
+                  if (item?.teamId) return false;
+                  const submittedBy = String(item?.submittedBy || "");
+                  return (
+                    submittedBy === registrationStudentId ||
+                    submittedBy === String(activeStudentId || "")
+                  );
+                }) ||
+                candidates.find((item) => !item?.teamId) ||
+                null;
+            }
+          }
+          const submissionOpenAt = competition.registrationClose || competition.registrationDeadline;
           const deadline = competition.submissionDeadline;
+
+          if (!submission && !isDateReached(submissionOpenAt)) {
+            return null;
+          }
+
           const status = submission
             ? "submitted"
             : isDeadlinePassed(deadline)
@@ -305,7 +391,7 @@ export default function Submissions() {
                 timeLimit: competition.quizDurationMinutes
                   ? `${competition.quizDurationMinutes} minutes`
                   : "60 minutes",
-                questions: generateQuizQuestions(),
+                questions: [],
               }
             : null;
 
@@ -313,30 +399,147 @@ export default function Submissions() {
             id: reg.id || `${reg.competitionId}-${reg.teamId || reg.studentId}`,
             competitionId: reg.competitionId,
             competition: competition.title,
+            teamId: reg.teamId || null,
+            studentId: reg.studentId || null,
             team: team ? team.teamName : (isTeam ? "Team" : null),
             teamLeaderId: team ? team.leaderId : null,
             isTeam,
             submissionType,
             submittedAt: submission?.submittedAt ? formatDateTime(submission.submittedAt) : null,
+            submittedAtRaw: submission?.submittedAt || null,
             deadline,
+            submissionOpenAt,
             status,
             files: submission?.file ? [submission.file] : [],
             repoLink: submission?.repoLink || null,
-            quizAnswers: submission?.quizAnswers ? toQuizAnswerMap(submission.quizAnswers) : null,
+            rawQuizAnswers: Array.isArray(submission?.quizAnswers) ? submission.quizAnswers : [],
+            quizAnswers: null,
+            description: submission?.description || "",
+            marksAwarded: submission?.marksAwarded ?? null,
+            feedback: submission?.feedback || "",
+            submissionStatus: submission?.submissionStatus || null,
+            totalMarks: competition?.totalMarks ?? null,
+            allowedFileTypes: competition?.allowedFileTypes || "",
             canResubmit: submissionType !== "quiz",
             isExternal: false,
             quiz,
+            sortDate: submission?.submittedAt || deadline || submissionOpenAt || competition?.createdAt || null,
           };
         })
         .filter(Boolean);
 
-      setInternalSubmissions(internal);
+      const quizCompetitionIds = Array.from(
+        new Set(
+          internal
+            .filter((item) => item.submissionType === "quiz")
+            .map((item) => item.competitionId)
+        )
+      );
+
+      let quizQuestionMap = new Map();
+      if (quizCompetitionIds.length > 0) {
+        const quizPairs = await Promise.all(
+          quizCompetitionIds.map(async (competitionId) => {
+            const res = await fetch(
+              `${API_BASE_URL}/competitions/${competitionId}/submissions/quiz/questions`,
+              { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (!res.ok) {
+              return [competitionId, []];
+            }
+            const data = await res.json().catch(() => []);
+            return [competitionId, normalizeQuizQuestions(data)];
+          })
+        );
+        quizQuestionMap = new Map(quizPairs);
+      }
+
+      const internalWithQuizQuestions = internal.map((item) => {
+        if (item.submissionType !== "quiz") {
+          return item;
+        }
+        return {
+          ...item,
+          totalMarks: item.submissionType === "quiz"
+            ? (quizQuestionMap.get(item.competitionId) || []).reduce((sum, question) => sum + (Number(question?.marks) || 0), 0)
+            : item.totalMarks,
+          quiz: {
+            ...item.quiz,
+            questions: quizQuestionMap.get(item.competitionId) || [],
+          },
+          quizAnswers: toQuizAnswerMapByQuestionId(
+            item.rawQuizAnswers,
+            quizQuestionMap.get(item.competitionId) || []
+          ),
+        };
+      });
+      internalWithQuizQuestions.sort((a, b) => toTimestamp(b.sortDate) - toTimestamp(a.sortDate));
+      setInternalSubmissions(internalWithQuizQuestions);
+
+      const externalCompetitionList = (Array.isArray(competitions) ? competitions : [])
+        .filter((competition) => String(competition?.competitionType || "").toUpperCase() === "EXTERNAL")
+        .filter((competition) => !!competition?.proofDeadline);
+      const participationByCompetitionId = new Map(
+        (Array.isArray(externalParticipations) ? externalParticipations : [])
+          .filter((item) => item?.competitionId)
+          .map((item) => [String(item.competitionId), item])
+      );
+      const mappedExternal = externalCompetitionList
+        .map((competition) => {
+          const competitionId = String(competition.competitionId || competition.id || "");
+          if (!competitionId) return null;
+          const participation = participationByCompetitionId.get(competitionId);
+          const deadline = competition.proofDeadline;
+          const submittedAtRaw = participation?.updatedAt || participation?.submittedAt || null;
+          return {
+            id: participation?.id || `external-${competitionId}`,
+            externalParticipationId: participation?.id || null,
+            competitionId,
+            competition: competition.title || "External Competition",
+            organizer: competition.organizer || "Unknown organizer",
+            scale: competition.scale || "-",
+            deadline,
+            submittedAt: submittedAtRaw ? formatDateTime(submittedAtRaw) : null,
+            submittedAtRaw,
+            status: mapExternalSubmissionStatus(participation?.status, deadline),
+            files: Array.isArray(participation?.proofFiles) ? participation.proofFiles : [],
+            participationResult: participation?.participationResult || null,
+            description: participation?.description || "",
+            adminNote: participation?.adminNote || participation?.notes || "",
+            attendanceRecoveryReport: participation?.attendanceRecoveryReport || null,
+            attendanceRecoveryGeneratedAt: participation?.attendanceRecoveryGeneratedAt
+              ? formatDateTime(participation.attendanceRecoveryGeneratedAt)
+              : null,
+            adminEnabled: true,
+            isExternal: true,
+            websiteLink: competition.websiteLink || competition.website || null,
+            sortDate: submittedAtRaw || deadline || competition.startDate || competition.createdAt || null,
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => {
+          const aDate = new Date(a.deadline || 0).getTime();
+          const bDate = new Date(b.deadline || 0).getTime();
+          return bDate - aDate;
+        });
+      setExternalSubmissions(mappedExternal);
     } catch (error) {
       const message = error?.message || "Failed to load submissions.";
       setLoadError(message);
       setInternalSubmissions([]);
+      setExternalSubmissions([]);
     } finally {
-      setLoading(false);
+      hasLoadedDataRef.current = true;
+      if (shouldShowLoading) {
+        setLoading(false);
+      }
+      isLoadingDataRef.current = false;
+      if (pendingReloadRef.current) {
+        const queuedForce = pendingReloadForceRef.current;
+        pendingReloadRef.current = false;
+        pendingReloadForceRef.current = false;
+        void loadData({ force: queuedForce });
+      }
     }
   };
 
@@ -346,8 +549,90 @@ export default function Submissions() {
       setLoadError("Submissions are available for student role only.");
       return;
     }
-    loadData();
+    loadData({ force: false });
+    const handleSubmissionUpdate = () => {
+      if (skipOwnRefreshEventsRef.current > 0) {
+        skipOwnRefreshEventsRef.current -= 1;
+        return;
+      }
+      loadData({ force: false });
+    };
+    window.addEventListener("submissions:updated", handleSubmissionUpdate);
+    window.addEventListener("notifications:updated", handleSubmissionUpdate);
+    window.addEventListener("competitions:updated", handleSubmissionUpdate);
+    window.addEventListener("session:changed", handleSubmissionUpdate);
+    return () => {
+      window.removeEventListener("submissions:updated", handleSubmissionUpdate);
+      window.removeEventListener("notifications:updated", handleSubmissionUpdate);
+      window.removeEventListener("competitions:updated", handleSubmissionUpdate);
+      window.removeEventListener("session:changed", handleSubmissionUpdate);
+    };
   }, [userRole]);
+
+  const matchesInternalTarget = (item, target) => {
+    if (!item || !target) return false;
+    if (item.competitionId !== target.competitionId) return false;
+    if (target.isTeam) {
+      if (!item.isTeam) return false;
+      if (item.teamId && target.teamId) {
+        return item.teamId === target.teamId;
+      }
+      return item.id === target.id;
+    }
+    if (item.isTeam) return false;
+    if (item.studentId && target.studentId) {
+      return item.studentId === target.studentId;
+    }
+    return item.id === target.id;
+  };
+
+  const markInternalSubmittedLocally = (target, patch = {}) => {
+    if (!target) return;
+    const submittedAtIso = new Date().toISOString();
+    const submittedAtLabel = formatDateTime(submittedAtIso);
+    setInternalSubmissions((prev) =>
+      prev
+        .map((item) => {
+          if (!matchesInternalTarget(item, target)) {
+            return item;
+          }
+          return {
+            ...item,
+            status: "submitted",
+            submittedAt: submittedAtLabel,
+            submittedAtRaw: submittedAtIso,
+            sortDate: submittedAtIso,
+            ...patch,
+          };
+        })
+        .sort((a, b) => toTimestamp(b.sortDate) - toTimestamp(a.sortDate))
+    );
+  };
+
+  const markExternalSubmittedLocally = (competitionId, patch = {}) => {
+    if (!competitionId) return;
+    const submittedAtIso = new Date().toISOString();
+    const submittedAtLabel = formatDateTime(submittedAtIso);
+    setExternalSubmissions((prev) =>
+      prev.map((item) => {
+        if (String(item.competitionId) !== String(competitionId)) {
+          return item;
+        }
+        const next = {
+          ...item,
+          status: "pending_approval",
+          submittedAt: submittedAtLabel,
+          submittedAtRaw: submittedAtIso,
+          sortDate: submittedAtIso,
+          ...patch,
+        };
+        if (!Array.isArray(next.files) || next.files.length === 0) {
+          next.files = item.files;
+        }
+        return next;
+      })
+    );
+  };
 
   const canSubmit = (submission) => {
     if (!submission.isTeam) return true;
@@ -361,7 +646,109 @@ export default function Submissions() {
     return date < new Date();
   };
 
+  const isDateReached = (value) => {
+    if (!value) return true;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return true;
+    return date <= new Date();
+  };
+
+  const matchesSubmissionFilter = (submission) => {
+    if (statusFilter === "all") return true;
+    const status = String(submission?.status || "").toLowerCase();
+    if (statusFilter === "pending") {
+      return status === "pending";
+    }
+    if (statusFilter === "submitted") {
+      if (submission?.isExternal) {
+        return status === "pending_approval" || status === "approved" || status === "rejected";
+      }
+      return status === "submitted";
+    }
+    return true;
+  };
+
+  const deadlineSortValue = (submission) => {
+    const rawDeadline = submission?.deadline;
+    if (!rawDeadline) return Number.POSITIVE_INFINITY;
+    const parsed = new Date(rawDeadline).getTime();
+    return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
+  };
+
+  const latestSortValue = (submission) => {
+    const submittedAt = toTimestamp(submission?.submittedAtRaw || submission?.submittedAt || 0);
+    if (submittedAt > 0) return submittedAt;
+    const activityAt = toTimestamp(submission?.sortDate || 0);
+    if (activityAt > 0) return activityAt;
+    return toTimestamp(submission?.deadline || 0);
+  };
+
+  const isDeadlineOverForSort = (submission) => {
+    const status = String(submission?.status || "").toLowerCase();
+    if (status === "overdue") return true;
+    const rawDeadline = submission?.deadline;
+    if (!rawDeadline) return false;
+    const parsed = new Date(rawDeadline).getTime();
+    if (Number.isNaN(parsed)) return false;
+    return parsed < Date.now();
+  };
+
+  const byLatestToOldest = (a, b) => {
+    return latestSortValue(b) - latestSortValue(a);
+  };
+
+  const byNearestDeadlineFirst = (a, b) => {
+    const deadlineDiff = deadlineSortValue(a) - deadlineSortValue(b);
+    if (deadlineDiff !== 0) return deadlineDiff;
+    return byLatestToOldest(a, b);
+  };
+
+  const byAllTabPriority = (a, b) => {
+    const aOver = isDeadlineOverForSort(a);
+    const bOver = isDeadlineOverForSort(b);
+    if (aOver !== bOver) {
+      return aOver ? 1 : -1;
+    }
+
+    if (!aOver && !bOver) {
+      // Active submissions first by nearest deadline (few minutes left shown first).
+      const activeDeadlineDiff = deadlineSortValue(a) - deadlineSortValue(b);
+      if (activeDeadlineDiff !== 0) return activeDeadlineDiff;
+      return byLatestToOldest(a, b);
+    }
+
+    // Overdue submissions: latest overdue deadline first.
+    const overdueDeadlineDiff = deadlineSortValue(b) - deadlineSortValue(a);
+    if (overdueDeadlineDiff !== 0) return overdueDeadlineDiff;
+    return byLatestToOldest(a, b);
+  };
+
+  const sortComparator = statusFilter === "all"
+    ? byAllTabPriority
+    : statusFilter === "pending"
+      ? byNearestDeadlineFirst
+      : byLatestToOldest;
+
+  const filteredInternalSubmissions = internalSubmissions
+    .filter(matchesSubmissionFilter)
+    .slice()
+    .sort(sortComparator);
+  const filteredExternalSubmissions = externalSubmissions
+    .filter((submission) => submission.adminEnabled)
+    .filter(matchesSubmissionFilter)
+    .slice()
+    .sort(sortComparator);
+  const filteredAllSubmissions = [...filteredInternalSubmissions, ...filteredExternalSubmissions]
+    .sort(sortComparator);
+  const visibleExternalCount = externalSubmissions.filter((submission) => submission.adminEnabled).length;
+  const visibleAllCount = internalSubmissions.length + visibleExternalCount;
+
   const openSubmitModal = (submission) => {
+    if (submission.status === "overdue") {
+      toast.error("Submission is finished. Deadline is over.");
+      return;
+    }
+
     if (submission.submissionType === "quiz" && submission.status === "submitted") {
       setSelectedSubmission(submission);
       setViewingQuizAnswers(submission.quizAnswers);
@@ -370,6 +757,10 @@ export default function Submissions() {
     }
     
     if (submission.submissionType === "quiz" && submission.status === "pending") {
+      if ((submission.quiz?.questions?.length || 0) === 0) {
+        toast.error("Quiz questions are not available yet. Ask teacher to publish questions.");
+        return;
+      }
       setSelectedSubmission(submission);
       setShowQuizAttempt(true);
       return;
@@ -378,19 +769,40 @@ export default function Submissions() {
     setSelectedSubmission(submission);
     setShowSubmitModal(true);
     setUploadedFile(null);
+    setUploadedProofFiles([]);
     setRepoLink(submission.repoLink || "");
+    setInternalNote(submission.description || "");
     setParticipationResult(submission.participationResult || "");
     setExternalDescription(submission.description || "");
   };
 
   const handleFileUpload = (e) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const ext = file.name.split('.').pop().toLowerCase();
-      if (selectedSubmission?.isExternal && !['png', 'pdf'].includes(ext)) {
+    if (selectedSubmission?.isExternal) {
+      const files = Array.from(e.target.files || []);
+      if (files.length === 0) return;
+      const invalid = files.find((file) => {
+        const ext = file.name.split(".").pop().toLowerCase();
+        return !["png", "pdf"].includes(ext);
+      });
+      if (invalid) {
         toast.error("Only PNG and PDF files are allowed for external submissions");
         return;
       }
+      setUploadedProofFiles((prev) => {
+        const next = [...prev];
+        for (const file of files) {
+          if (!next.some((existing) => existing.name === file.name && existing.size === file.size)) {
+            next.push(file);
+          }
+        }
+        return next;
+      });
+      return;
+    }
+
+    const file = e.target.files?.[0];
+    if (file) {
+      const ext = file.name.split('.').pop().toLowerCase();
       // Check custom allowed file types for internal submissions
       if (!selectedSubmission?.isExternal && selectedSubmission?.allowedFileTypes) {
         const allowedExts = selectedSubmission.allowedFileTypes.split(',').map(t => t.replace('.', '').trim());
@@ -403,11 +815,50 @@ export default function Submissions() {
     }
   };
 
-  const handleFileDownload = (fileName) => {
-    const link = document.createElement("a");
-    link.href = "#";
-    link.download = fileName;
-    alert(`Downloading: ${fileName}`);
+  const removeUploadedProofFile = (index) => {
+    setUploadedProofFiles((prev) => prev.filter((_, fileIndex) => fileIndex !== index));
+  };
+
+  const handleFileView = (fileRef) => {
+    if (!fileRef) return;
+    const url = resolveFileUrl(fileRef);
+    if (!url) {
+      toast.error("File link is not available.");
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  const handleFileDownload = async (fileRef, fallbackName = "attachment") => {
+    if (!fileRef) return;
+    const token = localStorage.getItem("userToken");
+    const url = resolveFileUrl(fileRef);
+    if (!url) {
+      toast.error("File link is not available.");
+      return;
+    }
+
+    try {
+      const response = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!response.ok) {
+        throw new Error("Download failed");
+      }
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      const headerFileName = parseFileNameFromDisposition(response.headers.get("content-disposition"));
+      const fileName = headerFileName || extractDisplayFileName(fileRef, fallbackName);
+      link.setAttribute("download", fileName);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+    } catch {
+      handleFileView(fileRef);
+    }
   };
 
   const handleQuizSubmit = async (answers) => {
@@ -421,7 +872,8 @@ export default function Submissions() {
     try {
       const totalQuestions = selectedSubmission.quiz?.questions?.length || 0;
       const payload = {
-        quizAnswers: toQuizAnswerList(answers, totalQuestions),
+        quizAnswers: toQuizAnswerList(answers, selectedSubmission.quiz?.questions || []).slice(0, totalQuestions),
+        questionIds: (selectedSubmission.quiz?.questions || []).map((question) => question.id),
       };
 
       const res = await fetch(
@@ -441,7 +893,20 @@ export default function Submissions() {
       }
 
       toast.success("Quiz submitted!");
-      await loadData();
+      markInternalSubmittedLocally(selectedSubmission, {
+        rawQuizAnswers: payload.quizAnswers,
+        quizAnswers: answers,
+      });
+      setStatusFilter("submitted");
+      invalidateApiCache((key) => {
+        const value = String(key);
+        return value.includes("/submissions")
+          || value.includes("/competitions/registrations/me")
+          || value.includes("submissions:")
+          || value.includes("registrations:me");
+      });
+      emitRefreshEvents("submissions:updated");
+      void loadData({ force: false });
     } catch (error) {
       toast.error(error?.message || "Failed to submit quiz.");
     } finally {
@@ -455,7 +920,13 @@ export default function Submissions() {
     if (!selectedSubmission) return;
 
     if (selectedSubmission.isExternal) {
-      if (!uploadedFile && selectedSubmission.files.length === 0) {
+      const canResubmit =
+        selectedSubmission.status === "pending" || selectedSubmission.status === "rejected";
+      if (!canResubmit || isDeadlinePassed(selectedSubmission.deadline)) {
+        toast.error("External proof cannot be submitted right now.");
+        return;
+      }
+      if (uploadedProofFiles.length === 0) {
         toast.error("Please upload proof files (PNG or PDF)");
         return;
       }
@@ -467,22 +938,79 @@ export default function Submissions() {
         toast.error("Please provide a description of your participation");
         return;
       }
-
-      setExternalSubmissions(prev => prev.map(sub => {
-        if (sub.id === selectedSubmission.id) {
-          return {
-            ...sub,
-            status: "pending_approval",
-            submittedAt: new Date().toLocaleString(),
-            files: uploadedFile ? [uploadedFile.name] : sub.files,
-            participationResult: participationResult,
-            description: externalDescription,
-          };
+      const token = localStorage.getItem("userToken");
+      if (!token) {
+        toast.error("Please log in to submit.");
+        return;
+      }
+      try {
+        const createRes = await fetch(`${API_BASE_URL}/api/external/participations`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            competitionId: selectedSubmission.competitionId,
+            title: selectedSubmission.competition,
+            description: externalDescription.trim(),
+            participationResult,
+          }),
+        });
+        if (!createRes.ok) {
+          throw new Error(await readErrorMessage(createRes));
         }
-        return sub;
-      }));
-      toast.success("External participation proof submitted for admin approval!");
-      setShowSubmitModal(false);
+        const created = await createRes.json();
+        const participationId = created?.id;
+        if (!participationId) {
+          throw new Error("External submission was created but ID is missing.");
+        }
+
+        const uploadedUrls = [];
+        for (const file of uploadedProofFiles) {
+          const formData = new FormData();
+          formData.append("file", file);
+          const uploadRes = await fetch(`${API_BASE_URL}/api/external/participations/${participationId}/proof`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+            body: formData,
+          });
+          if (!uploadRes.ok) {
+            throw new Error(await readErrorMessage(uploadRes));
+          }
+          const uploadBody = await uploadRes.json().catch(() => null);
+          const uploadedUrl = uploadBody?.message || uploadBody?.url || uploadBody?.file || null;
+          if (uploadedUrl) {
+            uploadedUrls.push(uploadedUrl);
+          }
+        }
+
+        toast.success("External participation proof submitted for admin approval!");
+        markExternalSubmittedLocally(selectedSubmission.competitionId, {
+          externalParticipationId: participationId,
+          files: uploadedUrls.length > 0 ? uploadedUrls : undefined,
+          participationResult,
+          description: externalDescription.trim(),
+        });
+        setStatusFilter("submitted");
+        invalidateApiCache((key) => {
+          const value = String(key);
+          return value.includes("/api/external/participations")
+            || value.includes("/api/competitions")
+            || value.includes("/api/notifications")
+            || value.includes("external:participations:")
+            || value.includes("competitions:")
+            || value.includes("notifications");
+        });
+        emitRefreshEvents("submissions:updated", "notifications:updated");
+        setShowSubmitModal(false);
+        setUploadedProofFiles([]);
+        setParticipationResult("");
+        setExternalDescription("");
+        void loadData({ force: false });
+      } catch (error) {
+        toast.error(error?.message || "Failed to submit external participation proof.");
+      }
       return;
     }
 
@@ -505,16 +1033,24 @@ export default function Submissions() {
           toast.error("Please upload a file before submitting.");
           return;
         }
+        if (!internalNote.trim()) {
+          toast.error("Please provide your submission note.");
+          return;
+        }
         endpoint = `/competitions/${competitionId}/submissions/assignment`;
-        payload = { file: fileName, description: "" };
+        payload = { file: fileName, description: internalNote.trim() };
       } else if (selectedSubmission.submissionType === "repo") {
         const link = repoLink || selectedSubmission.repoLink;
         if (!link) {
           toast.error("Please provide a repository link.");
           return;
         }
+        if (!internalNote.trim()) {
+          toast.error("Please provide your submission note.");
+          return;
+        }
         endpoint = `/competitions/${competitionId}/submissions/project`;
-        payload = { repoLink: link, description: "" };
+        payload = { repoLink: link, description: internalNote.trim() };
       } else {
         toast.error("Unsupported submission type.");
         return;
@@ -532,10 +1068,38 @@ export default function Submissions() {
       if (!res.ok) {
         throw new Error(await readErrorMessage(res));
       }
+      const savedSubmission = await res.json().catch(() => null);
+      if (selectedSubmission.submissionType === "file") {
+        markInternalSubmittedLocally(selectedSubmission, {
+          files: savedSubmission?.file
+            ? [savedSubmission.file]
+            : (payload.file ? [payload.file] : selectedSubmission.files),
+          description: savedSubmission?.description || payload.description || selectedSubmission.description,
+        });
+      } else if (selectedSubmission.submissionType === "repo") {
+        markInternalSubmittedLocally(selectedSubmission, {
+          repoLink: savedSubmission?.repoLink || payload.repoLink || selectedSubmission.repoLink,
+          description: savedSubmission?.description || payload.description || selectedSubmission.description,
+        });
+      } else {
+        markInternalSubmittedLocally(selectedSubmission);
+      }
+      setStatusFilter("submitted");
 
       toast.success("Submission successful!");
-      await loadData();
+      invalidateApiCache((key) => {
+        const value = String(key);
+        return value.includes("/submissions")
+          || value.includes("/competitions/registrations/me")
+          || value.includes("submissions:")
+          || value.includes("registrations:me");
+      });
+      emitRefreshEvents("submissions:updated");
       setShowSubmitModal(false);
+      setInternalNote("");
+      setUploadedFile(null);
+      setRepoLink("");
+      void loadData({ force: false });
     } catch (error) {
       toast.error(error?.message || "Failed to submit.");
     }
@@ -576,6 +1140,10 @@ export default function Submissions() {
     const isLeader = canSubmit(submission);
     const TypeInfo = submissionTypeLabels[submission.submissionType];
     const isQuiz = submission.submissionType === "quiz";
+    const hasQuizQuestions = (submission.quiz?.questions?.length || 0) > 0;
+    const isSubmissionOver = submission.status === "overdue";
+    const showEvaluation = isDeadlinePassed(submission.deadline)
+      && (submission.marksAwarded != null || (submission.feedback && submission.feedback.trim().length > 0));
     
     return (
       <div key={submission.id} className="card-static p-6">
@@ -630,6 +1198,23 @@ export default function Submissions() {
             <p className="text-sm text-muted-foreground">
               Submitted on {submission.submittedAt}
             </p>
+            {!isQuiz && submission.description && (
+              <p className="text-sm text-foreground">{submission.description}</p>
+            )}
+            {showEvaluation && (
+              <div className="rounded-lg border border-success/20 bg-success/5 p-3">
+                <p className="text-xs text-success font-medium">Evaluation Result</p>
+                {submission.marksAwarded != null && (
+                  <p className="text-sm text-foreground mt-1">
+                    Score: <strong>{submission.marksAwarded}</strong>
+                    {submission.totalMarks != null && submission.totalMarks > 0 ? ` / ${submission.totalMarks}` : ""}
+                  </p>
+                )}
+                {submission.feedback && (
+                  <p className="text-sm text-foreground mt-1">{submission.feedback}</p>
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
               {submission.files.map((file, index) => (
                 <div 
@@ -637,7 +1222,14 @@ export default function Submissions() {
                   className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-card border border-border text-sm"
                 >
                   <FileText className="w-4 h-4 text-secondary" />
-                  {file}
+                  {extractDisplayFileName(file, `File ${index + 1}`)}
+                  <Button 
+                    variant="ghost" 
+                    size="icon-sm"
+                    onClick={() => handleFileView(file)}
+                  >
+                    <Eye className="w-3 h-3" />
+                  </Button>
                   <Button 
                     variant="ghost" 
                     size="icon-sm"
@@ -686,19 +1278,26 @@ export default function Submissions() {
             {isLeader ? (
               <>
                 <div className="flex items-start gap-3 mb-4">
-                  <AlertCircle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
+                  <AlertCircle className={cn("w-5 h-5 flex-shrink-0 mt-0.5", isSubmissionOver ? "text-destructive" : "text-warning")} />
                   <div>
-                    <p className="font-medium text-foreground">Submission Required</p>
+                    <p className="font-medium text-foreground">{isSubmissionOver ? "Submission Finished" : "Submission Required"}</p>
                     <p className="text-sm text-muted-foreground">
-                      {TypeInfo.description}
+                      {isSubmissionOver ? "Submission deadline has passed. You cannot submit now." : TypeInfo.description}
                     </p>
                   </div>
                 </div>
                 
                 {submission.submissionType === "file" && (
                   <div 
-                    className="border-2 border-dashed border-border rounded-lg p-4 text-center hover:border-secondary transition-colors cursor-pointer"
-                    onClick={() => openSubmitModal(submission)}
+                    className={cn(
+                      "border-2 border-dashed border-border rounded-lg p-4 text-center transition-colors",
+                      isSubmissionOver ? "opacity-60 cursor-not-allowed bg-muted/40" : "hover:border-secondary cursor-pointer"
+                    )}
+                    onClick={() => {
+                      if (!isSubmissionOver) {
+                        openSubmitModal(submission);
+                      }
+                    }}
                   >
                     <Upload className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
                     <p className="text-sm font-medium">Upload Files</p>
@@ -710,8 +1309,15 @@ export default function Submissions() {
                 
                 {submission.submissionType === "repo" && (
                   <div 
-                    className="border-2 border-dashed border-border rounded-lg p-4 text-center hover:border-secondary transition-colors cursor-pointer"
-                    onClick={() => openSubmitModal(submission)}
+                    className={cn(
+                      "border-2 border-dashed border-border rounded-lg p-4 text-center transition-colors",
+                      isSubmissionOver ? "opacity-60 cursor-not-allowed bg-muted/40" : "hover:border-secondary cursor-pointer"
+                    )}
+                    onClick={() => {
+                      if (!isSubmissionOver) {
+                        openSubmitModal(submission);
+                      }
+                    }}
                   >
                     <LinkIcon className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
                     <p className="text-sm font-medium">Add Repository Link</p>
@@ -721,23 +1327,38 @@ export default function Submissions() {
                 
                 {submission.submissionType === "quiz" && (
                   <div 
-                    className="border-2 border-dashed border-secondary/50 rounded-lg p-6 text-center bg-secondary/5 cursor-pointer hover:bg-secondary/10 transition-colors"
-                    onClick={() => openSubmitModal(submission)}
+                    className={cn(
+                      "border-2 border-dashed border-secondary/50 rounded-lg p-6 text-center transition-colors",
+                      hasQuizQuestions
+                        ? (isSubmissionOver ? "bg-muted/40 cursor-not-allowed opacity-80" : "bg-secondary/5 cursor-pointer hover:bg-secondary/10")
+                        : "bg-muted/40 cursor-not-allowed opacity-80"
+                    )}
+                    onClick={() => {
+                      if (!isSubmissionOver) {
+                        openSubmitModal(submission);
+                      }
+                    }}
                   >
                     <Play className="w-10 h-10 mx-auto text-secondary mb-3" />
                     <p className="text-lg font-semibold text-foreground">Start Quiz</p>
                     <p className="text-sm text-muted-foreground mt-1">
-                      {submission.quiz?.questions.length} questions • {submission.quiz?.timeLimit}
+                      {submission.quiz?.questions.length || 0} questions • {submission.quiz?.timeLimit}
                     </p>
                     <p className="text-xs text-warning mt-2 flex items-center justify-center gap-1">
                       <AlertCircle className="w-3 h-3" />
-                      Full-screen mode • No resubmission allowed
+                      Full-screen mode â€¢ No resubmission allowed
                     </p>
+                    {!hasQuizQuestions && (
+                      <p className="text-xs text-destructive mt-2">
+                        No published questions yet.
+                      </p>
+                    )}
                   </div>
                 )}
                 
                 <Button 
                   className="w-full mt-4" 
+                  disabled={isSubmissionOver || (isQuiz && !hasQuizQuestions)}
                   onClick={() => openSubmitModal(submission)}
                 >
                   {submission.submissionType === "quiz" ? (
@@ -770,17 +1391,8 @@ export default function Submissions() {
   const renderExternalSubmission = (submission) => {
     const StatusIcon = statusConfig[submission.status].icon;
     const deadlinePassed = isDeadlinePassed(submission.deadline);
-    
-    // Don't show if deadline passed and not submitted
-    if (deadlinePassed && submission.status === "pending") {
-      return null;
-    }
-
-    // Check if student can resubmit (only when rejected and within deadline)
-    const canResubmit = submission.status === "rejected" && !deadlinePassed;
-    
-    // Check if submission is view-only (pending_approval or approved)
-    const isViewOnly = submission.status === "pending_approval" || submission.status === "approved";
+    const canSubmitNow = !deadlinePassed && (submission.status === "pending" || submission.status === "rejected");
+    const isViewOnly = !canSubmitNow;
     
     return (
       <div key={submission.id} className="card-static p-6">
@@ -806,18 +1418,33 @@ export default function Submissions() {
           <div className="text-right">
             <div className="flex items-center gap-2 text-sm">
               <Clock className="w-4 h-4 text-warning" />
-              <span>Deadline: <strong className="text-foreground">{submission.deadline}</strong></span>
+              <span>Deadline: <strong className="text-foreground">{formatDateTime(submission.deadline)}</strong></span>
             </div>
           </div>
         </div>
 
-        {/* Info text - only show for pending (not yet submitted) */}
+        {/* Info text - initial submit */}
         {submission.status === "pending" && (
           <div className="bg-info/5 border border-info/20 rounded-lg p-3 mb-4">
             <p className="text-sm text-info flex items-center gap-2">
               <Award className="w-4 h-4" />
-              External participation can be uploaded (one-time submission)
+              External participation can be uploaded for this competition.
             </p>
+          </div>
+        )}
+
+        {/* Info text - rejected resubmission */}
+        {submission.status === "rejected" && !deadlinePassed && (
+          <div className="bg-warning/10 border border-warning/20 rounded-lg p-3 mb-4">
+            <p className="text-sm text-warning flex items-center gap-2">
+              <AlertCircle className="w-4 h-4" />
+              Rejected by admin. You can resubmit before the proof deadline.
+            </p>
+            {submission.adminNote && (
+              <p className="text-xs text-muted-foreground mt-1">
+                Reason: <strong className="text-foreground">{submission.adminNote}</strong>
+              </p>
+            )}
           </div>
         )}
 
@@ -858,21 +1485,59 @@ export default function Submissions() {
           <div className="bg-destructive/5 border border-destructive/20 rounded-lg p-3 mb-4">
             <p className="text-sm text-destructive flex items-center gap-2">
               <XCircle className="w-4 h-4" />
-              {canResubmit 
-                ? "Your submission was rejected. You may resubmit within the deadline."
-                : "Your submission was rejected. The deadline has passed."}
+              Your submission was rejected.
             </p>
+            {submission.adminNote && (
+              <p className="text-xs text-muted-foreground mt-1">
+                Reason: <strong className="text-foreground">{submission.adminNote}</strong>
+              </p>
+            )}
+          </div>
+        )}
+        {submission.status === "approved" && submission.attendanceRecoveryReport && (
+          <div className="bg-success/5 border border-success/20 rounded-lg p-3 mb-4">
+            <p className="text-sm text-success font-medium flex items-center gap-2">
+              <FileText className="w-4 h-4" />
+              Attendance Recovery Report
+            </p>
+            <p className="text-sm text-foreground mt-1">{submission.attendanceRecoveryReport}</p>
+            {submission.attendanceRecoveryGeneratedAt && (
+              <p className="text-xs text-muted-foreground mt-1">
+                Generated at {submission.attendanceRecoveryGeneratedAt}
+              </p>
+            )}
           </div>
         )}
 
-        {/* Submitted state - show submission details */}
-        {submission.status !== "pending" ? (
+        {submission.status === "overdue" ? (
+          <div className="bg-muted/30 rounded-lg p-4 border border-border">
+            <p className="text-sm text-muted-foreground">
+              Proof submission deadline is over. You can no longer submit for this competition.
+            </p>
+          </div>
+        ) : !canSubmitNow ? (
           <div className="bg-muted/30 rounded-lg p-4 space-y-3">
             <p className="text-sm text-muted-foreground">
               Submitted on {submission.submittedAt}
             </p>
             {submission.description && (
               <p className="text-sm text-foreground">{submission.description}</p>
+            )}
+            {submission.status === "rejected" && submission.adminNote && (
+              <p className="text-xs text-muted-foreground">
+                Reason: <strong className="text-foreground">{submission.adminNote}</strong>
+              </p>
+            )}
+            {submission.status === "approved" && submission.attendanceRecoveryReport && (
+              <div className="rounded-lg border border-success/20 bg-success/5 p-3">
+                <p className="text-xs text-success font-medium">Attendance Recovery Report</p>
+                <p className="text-sm text-foreground mt-1">{submission.attendanceRecoveryReport}</p>
+                {submission.attendanceRecoveryGeneratedAt && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Generated at {submission.attendanceRecoveryGeneratedAt}
+                  </p>
+                )}
+              </div>
             )}
             <div className="flex flex-wrap gap-2">
               {submission.files.map((file, index) => (
@@ -881,7 +1546,14 @@ export default function Submissions() {
                   className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-card border border-border text-sm"
                 >
                   <FileText className="w-4 h-4 text-secondary" />
-                  {file}
+                  {extractDisplayFileName(file, `Proof File ${index + 1}`)}
+                  <Button 
+                    variant="ghost" 
+                    size="icon-sm"
+                    onClick={() => handleFileView(file)}
+                  >
+                    <Eye className="w-3 h-3" />
+                  </Button>
                   <Button 
                     variant="ghost" 
                     size="icon-sm"
@@ -898,18 +1570,6 @@ export default function Submissions() {
               )}
             </div>
             
-            {/* Only show resubmit button when rejected and within deadline */}
-            {canResubmit && (
-              <Button 
-                className="mt-2" 
-                size="sm"
-                onClick={() => openSubmitModal(submission)}
-              >
-                <Edit3 className="w-4 h-4 mr-2" />
-                Resubmit
-              </Button>
-            )}
-
             {/* View button for approved/pending_approval */}
             {isViewOnly && (
               <div className="flex gap-2 mt-2">
@@ -945,7 +1605,7 @@ export default function Submissions() {
               className="w-full mt-4" 
               onClick={() => openSubmitModal(submission)}
             >
-              Submit Participation Proof
+              {submission.status === "rejected" ? "Resubmit Participation Proof" : "Submit Participation Proof"}
             </Button>
           </div>
         )}
@@ -971,6 +1631,17 @@ export default function Submissions() {
         {/* Tabs */}
         <div className="flex rounded-lg border border-border overflow-hidden w-fit">
           <button
+            onClick={() => setActiveTab("all")}
+            className={cn(
+              "px-6 py-2.5 text-sm font-medium transition-colors",
+              activeTab === "all"
+                ? "bg-primary text-primary-foreground"
+                : "bg-card text-muted-foreground hover:bg-muted"
+            )}
+          >
+            All ({visibleAllCount})
+          </button>
+          <button
             onClick={() => setActiveTab("internal")}
             className={cn(
               "px-6 py-2.5 text-sm font-medium transition-colors",
@@ -990,11 +1661,48 @@ export default function Submissions() {
                 : "bg-card text-muted-foreground hover:bg-muted"
             )}
           >
-            External ({externalSubmissions.filter(s => s.adminEnabled).length})
+            External ({visibleExternalCount})
           </button>
         </div>
 
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-muted-foreground">Filter:</span>
+          <Button
+            variant={statusFilter === "all" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("all")}
+          >
+            All
+          </Button>
+          <Button
+            variant={statusFilter === "pending" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("pending")}
+          >
+            Pending
+          </Button>
+          <Button
+            variant={statusFilter === "submitted" ? "default" : "outline"}
+            size="sm"
+            onClick={() => setStatusFilter("submitted")}
+          >
+            Submitted
+          </Button>
+        </div>
+
         {/* Info Banner */}
+        {activeTab === "all" && (
+          <div className="bg-muted/40 border border-border rounded-lg p-4 flex items-start gap-3">
+            <Upload className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-medium text-foreground">All Submissions</p>
+              <p className="text-sm text-muted-foreground">
+                Active submissions are shown first by nearest deadline. Overdue items are listed after that from latest overdue deadline to oldest.
+              </p>
+            </div>
+          </div>
+        )}
+
         {activeTab === "internal" && (
           <div className="bg-info/10 border border-info/20 rounded-lg p-4 flex items-start gap-3">
             <Shield className="w-5 h-5 text-info flex-shrink-0 mt-0.5" />
@@ -1015,7 +1723,7 @@ export default function Submissions() {
               <p className="font-medium text-foreground">External Participation</p>
               <p className="text-sm text-muted-foreground">
                 Upload proof of your participation in external competitions. Submit a description, your result, and proof files (PNG or PDF). 
-                <strong> You can only submit once. Resubmission is only allowed if admin rejects your proof.</strong>
+                <strong> If admin rejects your proof, you can resubmit before the deadline.</strong>
               </p>
             </div>
           </div>
@@ -1023,31 +1731,43 @@ export default function Submissions() {
 
         {/* Submissions List */}
         <div className="space-y-4">
-          {activeTab === "internal" && loading && (
+          {(activeTab === "all" || activeTab === "internal") && loading && (
             <div className="card-static p-6 text-center text-muted-foreground">
               Loading submissions...
             </div>
           )}
-          {activeTab === "internal" && !loading && loadError && (
+          {(activeTab === "all" || activeTab === "internal") && !loading && loadError && (
             <div className="card-static p-6 text-center text-destructive">
               {loadError}
             </div>
           )}
-          {activeTab === "internal" && !loading && !loadError && internalSubmissions.map(renderInternalSubmission)}
-          {activeTab === "external" && externalSubmissions.filter(s => s.adminEnabled).map(renderExternalSubmission)}
+          {activeTab === "all" && !loading && !loadError && filteredAllSubmissions.map((submission) => (
+            submission.isExternal
+              ? renderExternalSubmission(submission)
+              : renderInternalSubmission(submission)
+          ))}
+          {activeTab === "internal" && !loading && !loadError && filteredInternalSubmissions.map(renderInternalSubmission)}
+          {activeTab === "external" && filteredExternalSubmissions.map(renderExternalSubmission)}
         </div>
 
-        {activeTab === "internal" && !loading && !loadError && internalSubmissions.length === 0 && (
+        {activeTab === "all" && !loading && !loadError && filteredAllSubmissions.length === 0 && (
           <div className="card-static p-12 text-center">
             <Upload className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-            <p className="text-muted-foreground">No internal submissions yet. Register for a competition to get started!</p>
+            <p className="text-muted-foreground">No submissions found for this filter.</p>
           </div>
         )}
 
-        {activeTab === "external" && externalSubmissions.filter(s => s.adminEnabled).length === 0 && (
+        {activeTab === "internal" && !loading && !loadError && filteredInternalSubmissions.length === 0 && (
+          <div className="card-static p-12 text-center">
+            <Upload className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
+            <p className="text-muted-foreground">No internal submissions found for this filter.</p>
+          </div>
+        )}
+
+        {activeTab === "external" && filteredExternalSubmissions.length === 0 && (
           <div className="card-static p-12 text-center">
             <Globe className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-            <p className="text-muted-foreground">No external competitions available for submission yet. Check back later!</p>
+            <p className="text-muted-foreground">No external submissions found for this filter.</p>
           </div>
         )}
 
@@ -1059,15 +1779,18 @@ export default function Submissions() {
           accept={selectedSubmission?.isExternal 
             ? ".png,.pdf" 
             : (selectedSubmission?.allowedFileTypes || ".pdf,.doc,.docx,.xlsx,.xls,.zip")}
+          multiple={!!selectedSubmission?.isExternal}
           onChange={handleFileUpload}
         />
 
         {/* Submit Modal */}
         {showSubmitModal && selectedSubmission && (() => {
-          const isExternalViewOnly = selectedSubmission.isExternal && 
-            (selectedSubmission.status === "pending_approval" || selectedSubmission.status === "approved");
-          const isExternalResubmit = selectedSubmission.isExternal && 
-            selectedSubmission.status === "rejected" && !isDeadlinePassed(selectedSubmission.deadline);
+          const isExternalViewOnly = selectedSubmission.isExternal && (
+            selectedSubmission.status === "approved"
+            || selectedSubmission.status === "pending_approval"
+            || selectedSubmission.status === "overdue"
+            || (selectedSubmission.status === "rejected" && isDeadlinePassed(selectedSubmission.deadline))
+          );
           
           return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/20 backdrop-blur-sm">
@@ -1075,11 +1798,10 @@ export default function Submissions() {
               <div className="flex items-center justify-between mb-4">
                 <h2 className="font-display font-semibold text-xl">
                   {selectedSubmission.isExternal 
-                    ? (isExternalViewOnly ? "View Submission" : 
-                       isExternalResubmit ? "Resubmit Proof" : "Submit External Participation Proof")
+                    ? (isExternalViewOnly ? "View Submission" : "Submit External Participation Proof")
                     : (selectedSubmission.status === "submitted" ? "View Submission" : "Submit Entry")} - {selectedSubmission.competition}
                 </h2>
-                <Button variant="ghost" size="icon" onClick={() => setShowSubmitModal(false)}>
+                <Button variant="ghost" size="icon" onClick={() => { setShowSubmitModal(false); setInternalNote(""); }}>
                   <X className="w-5 h-5" />
                 </Button>
               </div>
@@ -1094,24 +1816,64 @@ export default function Submissions() {
                         "rounded-lg p-3 mb-2",
                         selectedSubmission.status === "approved" 
                           ? "bg-success/10 border border-success/20" 
-                          : "bg-warning/10 border border-warning/20"
+                          : selectedSubmission.status === "pending_approval"
+                            ? "bg-warning/10 border border-warning/20"
+                            : "bg-muted/50 border border-border"
                       )}>
                         <p className={cn(
                           "text-sm flex items-center gap-2",
-                          selectedSubmission.status === "approved" ? "text-success" : "text-warning"
+                          selectedSubmission.status === "approved"
+                            ? "text-success"
+                            : selectedSubmission.status === "pending_approval"
+                              ? "text-warning"
+                              : "text-muted-foreground"
                         )}>
                           {selectedSubmission.status === "approved" ? (
                             <>
                               <CheckCircle2 className="w-4 h-4" />
                               This submission has been approved. View-only mode.
                             </>
-                          ) : (
+                          ) : selectedSubmission.status === "pending_approval" ? (
                             <>
                               <Clock className="w-4 h-4" />
                               This submission is pending review. View-only mode.
                             </>
+                          ) : selectedSubmission.status === "rejected" ? (
+                            <>
+                              <XCircle className="w-4 h-4" />
+                              This submission was rejected and deadline is over. View-only mode.
+                            </>
+                          ) : selectedSubmission.status === "overdue" ? (
+                            <>
+                              <Clock className="w-4 h-4" />
+                              Proof deadline is over. View-only mode.
+                            </>
+                          ) : (
+                            <>
+                              <Clock className="w-4 h-4" />
+                              View-only mode.
+                            </>
                           )}
                         </p>
+                      </div>
+                    )}
+
+                    {selectedSubmission.status === "rejected" && selectedSubmission.adminNote && (
+                      <div className="rounded-lg p-3 bg-destructive/5 border border-destructive/20">
+                        <p className="text-sm text-destructive">
+                          Rejection reason: <strong className="text-foreground">{selectedSubmission.adminNote}</strong>
+                        </p>
+                      </div>
+                    )}
+                    {selectedSubmission.status === "approved" && selectedSubmission.attendanceRecoveryReport && (
+                      <div className="rounded-lg p-3 bg-success/5 border border-success/20">
+                        <p className="text-sm text-success font-medium">Attendance Recovery Report</p>
+                        <p className="text-sm text-foreground mt-1">{selectedSubmission.attendanceRecoveryReport}</p>
+                        {selectedSubmission.attendanceRecoveryGeneratedAt && (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Generated at {selectedSubmission.attendanceRecoveryGeneratedAt}
+                          </p>
+                        )}
                       </div>
                     )}
 
@@ -1167,7 +1929,14 @@ export default function Submissions() {
                               {selectedSubmission.files.map((file, idx) => (
                                 <div key={idx} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-card border border-border text-sm">
                                   <FileText className="w-4 h-4 text-secondary" />
-                                  <span className="font-medium">{file}</span>
+                                  <span className="font-medium">{extractDisplayFileName(file, `Proof File ${idx + 1}`)}</span>
+                                  <Button 
+                                    variant="ghost" 
+                                    size="icon-sm"
+                                    onClick={() => handleFileView(file)}
+                                  >
+                                    <Eye className="w-3 h-3" />
+                                  </Button>
                                   <Button 
                                     variant="ghost" 
                                     size="icon-sm"
@@ -1187,21 +1956,23 @@ export default function Submissions() {
                           className="border-2 border-dashed border-border rounded-lg p-6 text-center hover:border-secondary transition-colors cursor-pointer"
                           onClick={() => fileInputRef.current?.click()}
                         >
-                          {uploadedFile ? (
-                            <div className="flex items-center justify-center gap-2">
-                              <FileText className="w-8 h-8 text-secondary" />
-                              <div className="text-left">
-                                <p className="font-medium">{uploadedFile.name}</p>
-                                <p className="text-xs text-muted-foreground">{(uploadedFile.size / 1024 / 1024).toFixed(2)} MB</p>
-                              </div>
-                              <Button 
-                                variant="ghost" 
-                                size="sm" 
-                                className="ml-2"
-                                onClick={(e) => { e.stopPropagation(); setUploadedFile(null); }}
-                              >
-                                <X className="w-4 h-4" />
-                              </Button>
+                          {uploadedProofFiles.length > 0 ? (
+                            <div className="space-y-2">
+                              {uploadedProofFiles.map((file, idx) => (
+                                <div key={`${file.name}-${idx}`} className="flex items-center justify-center gap-2">
+                                  <FileText className="w-6 h-6 text-secondary" />
+                                  <span className="font-medium">{file.name}</span>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="ml-2"
+                                    onClick={(e) => { e.stopPropagation(); removeUploadedProofFile(idx); }}
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </Button>
+                                </div>
+                              ))}
+                              <p className="text-xs text-muted-foreground mt-2">Click to add more proof files</p>
                             </div>
                           ) : selectedSubmission.files.length > 0 ? (
                             <div className="space-y-2">
@@ -1209,7 +1980,7 @@ export default function Submissions() {
                               {selectedSubmission.files.map((file, idx) => (
                                 <div key={idx} className="flex items-center justify-center gap-2">
                                   <FileText className="w-6 h-6 text-secondary" />
-                                  <span className="font-medium">{file}</span>
+                                  <span className="font-medium">{extractDisplayFileName(file, `Proof File ${idx + 1}`)}</span>
                                 </div>
                               ))}
                               <p className="text-xs text-muted-foreground mt-2">Click to upload a new file</p>
@@ -1257,7 +2028,14 @@ export default function Submissions() {
                           {selectedSubmission.files.map((file, idx) => (
                             <div key={idx} className="flex items-center justify-center gap-2">
                               <FileText className="w-6 h-6 text-secondary" />
-                              <span className="font-medium">{file}</span>
+                              <span className="font-medium">{extractDisplayFileName(file, `File ${idx + 1}`)}</span>
+                              <Button 
+                                variant="ghost" 
+                                size="icon-sm"
+                                onClick={(e) => { e.stopPropagation(); handleFileView(file); }}
+                              >
+                                <Eye className="w-4 h-4" />
+                              </Button>
                               <Button 
                                 variant="ghost" 
                                 size="icon-sm"
@@ -1314,13 +2092,17 @@ export default function Submissions() {
                   </div>
                 )}
                 
-                {/* Notes (Internal only) */}
-                {!selectedSubmission.isExternal && (
+                {/* Notes (Assignment / Project only) */}
+                {!selectedSubmission.isExternal && selectedSubmission.submissionType !== "quiz" && (
                   <div>
-                    <label className="text-sm font-medium text-foreground mb-1.5 block">Notes (Optional)</label>
+                    <label className="text-sm font-medium text-foreground mb-1.5 block">
+                      Submission Note <span className="text-destructive">*</span>
+                    </label>
                     <textarea
-                      placeholder="Any additional information about your submission..."
+                      placeholder="Explain your submission approach and key points..."
                       rows={3}
+                      value={internalNote}
+                      onChange={(e) => setInternalNote(e.target.value)}
                       className="w-full px-3 py-2 rounded-lg bg-muted/50 border border-border text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring resize-none"
                     />
                   </div>
@@ -1328,13 +2110,13 @@ export default function Submissions() {
               </div>
               
               <div className="flex justify-end gap-2 mt-6">
-                <Button variant="outline" onClick={() => setShowSubmitModal(false)}>
+                <Button variant="outline" onClick={() => { setShowSubmitModal(false); setInternalNote(""); }}>
                   {isExternalViewOnly ? "Close" : "Cancel"}
                 </Button>
                 {!isExternalViewOnly && (
                   <Button onClick={handleSubmit}>
                     {selectedSubmission.isExternal 
-                      ? (isExternalResubmit ? "Resubmit for Approval" : "Submit for Approval")
+                      ? "Submit for Approval"
                       : (selectedSubmission.status === "submitted" ? "Update Submission" : "Submit")}
                   </Button>
                 )}

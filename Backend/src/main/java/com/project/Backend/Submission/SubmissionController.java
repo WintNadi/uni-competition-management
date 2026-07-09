@@ -12,7 +12,7 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.project.Backend.Auth.security.services.UserDetailsImpl;
+import com.project.Backend.Auth.UserDetailsImpl;
 import com.project.Backend.Submission.RequestDTO.AssignmentSubmissionRequestDTO;
 import com.project.Backend.Submission.RequestDTO.ProjectSubmissionRequestDTO;
 import com.project.Backend.Submission.RequestDTO.QuizSubmissionRequestDTO;
@@ -164,6 +164,21 @@ public class SubmissionController {
                 try {
                         return ResponseEntity.status(HttpStatus.CREATED)
                                         .body(service.submitQuiz(competitionId, dto, studentId));
+                } catch (IllegalStateException | IllegalArgumentException ex) {
+                        return ResponseEntity.badRequest().body(new MessageResponse(ex.getMessage()));
+                }
+        }
+
+        @PreAuthorize("hasRole('STUDENT')")
+        @GetMapping("/competitions/{competitionId}/submissions/quiz/questions")
+        public ResponseEntity<?> getQuizQuestions(@PathVariable String competitionId) {
+                String studentId = currentUserId();
+                if (studentId == null) {
+                        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                                        .body(new MessageResponse("Unauthorized"));
+                }
+                try {
+                        return ResponseEntity.ok(service.getQuizQuestionsForAttempt(competitionId, studentId));
                 } catch (IllegalStateException | IllegalArgumentException ex) {
                         return ResponseEntity.badRequest().body(new MessageResponse(ex.getMessage()));
                 }

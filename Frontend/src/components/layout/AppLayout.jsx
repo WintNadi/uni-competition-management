@@ -4,7 +4,7 @@ import { AppSidebar } from "./AppSidebar";
 import { Bell, Menu, User, CheckCircle2, XCircle, Clock, Trophy, UserPlus, AlertCircle, X, LogOut, Mail, Phone, Eye, EyeOff, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { API_BASE_URL, resolveFileUrl } from "@/lib/api";
+import { API_BASE_URL, fetchJsonCached, invalidateApiCache, resolveFileUrl } from "@/lib/api";
 
 // Role-based notifications
 const getNotificationsForRole = (role) => {
@@ -145,6 +145,7 @@ const getNotificationsForRole = (role) => {
 
 const notificationIcons = {
   achievement: Trophy,
+  competition: Trophy,
   team: UserPlus,
   deadline: AlertCircle,
   submission: FileText,
@@ -172,8 +173,30 @@ export function AppLayout({ children, role = "student" }) {
     phone: "",
     department: "",
     role: role,
-    avatarUrl: null
+    avatarUrl: typeof window !== "undefined" ? (localStorage.getItem("userAvatarUrl") || null) : null
   });
+
+  const formatDateTimeLabel = (value) => {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleString("en-US", {
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+    });
+  };
+
+  const toTimestamp = (value) => {
+    if (!value) return 0;
+    const date = new Date(value);
+    const time = date.getTime();
+    return Number.isNaN(time) ? 0 : time;
+  };
 
   // Update profile and notifications based on role
   useEffect(() => {
@@ -181,35 +204,34 @@ export function AppLayout({ children, role = "student" }) {
       const token = localStorage.getItem("userToken");
       if (token) {
         try {
-          const res = await fetch(`${API_BASE_URL}/api/users/me`, {
-            headers: { Authorization: `Bearer ${token}` }
+          const data = await fetchJsonCached(`${API_BASE_URL}/api/users/me`, {
+            token,
+            ttlMs: 180000,
+            cacheKey: "users:me",
           });
-          if (res.ok) {
-            const data = await res.json();
-            const nextAvatarUrl = data.avatarUrl || null;
-            setUserProfile({
-              id: data.id,
-              name: data.fullName || data.username,
-              email: data.email,
-              phone: data.phone,
-              department: data.department,
-              role: data.roles && data.roles.length > 0 ? data.roles[0] : role,
-              avatarUrl: nextAvatarUrl,
-              bio: data.bio
-            });
-            
-            // Update localStorage for other components
-            if (data.id) {
-              localStorage.setItem("userId", data.id);
-            }
-            if (data.fullName) {
-              localStorage.setItem("userName", data.fullName);
-            }
-            if (data.avatarUrl) {
-              localStorage.setItem("userAvatarUrl", data.avatarUrl);
-            } else {
-              localStorage.removeItem("userAvatarUrl");
-            }
+          const nextAvatarUrl = data.avatarUrl || localStorage.getItem("userAvatarUrl") || null;
+          setUserProfile({
+            id: data.id,
+            name: data.fullName || data.username,
+            email: data.email,
+            phone: data.phone,
+            department: data.department,
+            role: data.roles && data.roles.length > 0 ? data.roles[0] : role,
+            avatarUrl: nextAvatarUrl,
+            bio: data.bio
+          });
+
+          // Update localStorage for other components
+          if (data.id) {
+            localStorage.setItem("userId", data.id);
+          }
+          if (data.fullName) {
+            localStorage.setItem("userName", data.fullName);
+          }
+          if (data.avatarUrl) {
+            localStorage.setItem("userAvatarUrl", data.avatarUrl);
+          } else {
+            localStorage.removeItem("userAvatarUrl");
           }
         } catch (error) {
           console.error("Failed to fetch profile", error);
@@ -217,46 +239,108 @@ export function AppLayout({ children, role = "student" }) {
       }
     };
 
-    const mapType = (t) => {
+    const isParticipationDecisionNotification = (t, title = "", message = "") => {
+      const combined = `${title || ""} ${message || ""}`.toLowerCase();
+      if (t === "REJECTION" || t === "ROLLBACK") return true;
+      if (t === "GENERAL" && combined.includes("participation")) return true;
+      return false;
+    };
+
+    const mapType = (t, title = "", message = "") => {
       switch (t) {
         case "ACHIEVEMENT_EARNED":
           return "achievement";
+        case "COMPETITION_CREATED":
+        case "COMPETITION_UPDATED":
+        case "COMPETITION_REGISTRATION_OPEN":
+        case "COMPETITION_REGISTRATION_CLOSED":
+          return "competition";
         case "EXTERNAL_PARTICIPATION_SUBMITTED":
           return "approval";
         case "TEAM_INVITATION":
+        case "TEAM_CONFIRMATION":
           return "team";
+        case "SUBMISSION_OPEN":
         case "SUBMISSION_SUCCESS":
+        case "SUBMISSION_RECEIVED":
+        case "SUBMISSION_DEADLINE_PASSED":
+        case "SUBMISSION_EVALUATED":
           return "submission";
+        case "REJECTION":
+        case "ROLLBACK":
+          return "approval";
+        case "GENERAL":
+          return isParticipationDecisionNotification(t, title, message) ? "approval" : "system";
         default:
           return "system";
       }
+    };
+    const routeForType = (t, relatedEntityId, title = "", message = "") => {
+      if (isParticipationDecisionNotification(t, title, message)) {
+        return role === "admin" ? "/admin/approvals" : "/submissions";
+      }
+      if (t === "EXTERNAL_PARTICIPATION_SUBMITTED") {
+        return role === "admin" ? "/admin/approvals" : "/notifications";
+      }
+      if (t === "COMPETITION_CREATED") {
+        return relatedEntityId ? `/competitions/${relatedEntityId}` : "/competitions";
+      }
+      if (t === "COMPETITION_UPDATED") {
+        return relatedEntityId ? `/competitions/${relatedEntityId}` : "/competitions";
+      }
+      if (t === "COMPETITION_REGISTRATION_OPEN" || t === "COMPETITION_REGISTRATION_CLOSED") {
+        return relatedEntityId ? `/competitions/${relatedEntityId}` : "/competitions";
+      }
+      if (t === "TEAM_INVITATION" || t === "TEAM_CONFIRMATION") {
+        return "/teams";
+      }
+      if (t === "SUBMISSION_OPEN") {
+        return role === "teacher" ? "/teacher/submissions" : "/submissions";
+      }
+      if (
+        t === "SUBMISSION_SUCCESS"
+        || t === "SUBMISSION_RECEIVED"
+        || t === "SUBMISSION_DEADLINE_PASSED"
+        || t === "SUBMISSION_EVALUATED"
+      ) {
+        if (role === "teacher") {
+          return relatedEntityId
+            ? `/teacher/submissions?competition=${encodeURIComponent(relatedEntityId)}`
+            : "/teacher/submissions";
+        }
+        return "/submissions";
+      }
+      return undefined;
     };
     const fetchNotifications = async () => {
       const token = localStorage.getItem("userToken");
       if (!token) return;
       try {
-        const res = await fetch(`${API_BASE_URL}/api/notifications`, {
-          headers: { Authorization: `Bearer ${token}` }
+        const data = await fetchJsonCached(`${API_BASE_URL}/api/notifications`, {
+          token,
+          ttlMs: 120000,
+          cacheKey: "notifications:list",
         });
-        if (res.ok) {
-          const data = await res.json();
-          const normalized = (Array.isArray(data) ? data : []).map((n) => ({
-            id: n.id,
-            type: mapType(n.type),
-            title: n.title,
-            message: n.message,
-            read: !!n.read || !!n.isRead,
-            time: n.createdAt ? new Date(n.createdAt).toLocaleString() : "",
-            route: n.type === "EXTERNAL_PARTICIPATION_SUBMITTED" ? "/admin/approvals" : undefined,
-          }));
-          setNotifications(normalized);
-        }
+        const normalized = (Array.isArray(data) ? data : []).map((n) => ({
+          id: n.id,
+          type: mapType(n.type, n.title, n.message),
+          title: n.title,
+          message: n.message,
+          relatedEntityId: n.relatedEntityId,
+          read: !!n.read || !!n.isRead,
+          time: formatDateTimeLabel(n.createdAt),
+          createdAtRaw: n.createdAt || null,
+          route: routeForType(n.type, n.relatedEntityId, n.title, n.message),
+        }));
+        normalized.sort((first, second) =>
+          toTimestamp(second.createdAtRaw) - toTimestamp(first.createdAtRaw)
+        );
+        setNotifications(normalized);
       } catch (e) {}
     };
 
     fetchProfile();
     fetchNotifications();
-    const intervalId = setInterval(fetchNotifications, 30000);
     let es;
     const token = localStorage.getItem("userToken");
     if (token) {
@@ -267,13 +351,18 @@ export function AppLayout({ children, role = "student" }) {
             const list = JSON.parse(e.data);
             const normalized = (Array.isArray(list) ? list : []).map((n) => ({
               id: n.id,
-              type: mapType(n.type),
+              type: mapType(n.type, n.title, n.message),
               title: n.title,
               message: n.message,
+              relatedEntityId: n.relatedEntityId,
               read: !!n.read || !!n.isRead,
-              time: n.createdAt ? new Date(n.createdAt).toLocaleString() : "",
-              route: n.type === "EXTERNAL_PARTICIPATION_SUBMITTED" ? "/admin/approvals" : undefined,
+              time: formatDateTimeLabel(n.createdAt),
+              createdAtRaw: n.createdAt || null,
+              route: routeForType(n.type, n.relatedEntityId, n.title, n.message),
             }));
+            normalized.sort((first, second) =>
+              toTimestamp(second.createdAtRaw) - toTimestamp(first.createdAtRaw)
+            );
             setNotifications(normalized);
           } catch {}
         });
@@ -282,24 +371,63 @@ export function AppLayout({ children, role = "student" }) {
             const n = JSON.parse(e.data);
             const normalized = {
               id: n.id,
-              type: mapType(n.type),
+              type: mapType(n.type, n.title, n.message),
               title: n.title,
               message: n.message,
+              relatedEntityId: n.relatedEntityId,
               read: !!n.read || !!n.isRead,
-              time: n.createdAt ? new Date(n.createdAt).toLocaleString() : "",
-              route: n.type === "EXTERNAL_PARTICIPATION_SUBMITTED" ? "/admin/approvals" : undefined,
+              time: formatDateTimeLabel(n.createdAt),
+              createdAtRaw: n.createdAt || null,
+              route: routeForType(n.type, n.relatedEntityId, n.title, n.message),
             };
             setNotifications((prev) => {
               const exists = prev.some((p) => p.id === normalized.id);
               const next = exists ? prev.map((p) => (p.id === normalized.id ? normalized : p)) : [normalized, ...prev];
+              next.sort((first, second) =>
+                toTimestamp(second.createdAtRaw) - toTimestamp(first.createdAtRaw)
+              );
               return next.slice(0, 100);
             });
+            invalidateApiCache((key) => String(key).includes("notifications"));
+            window.dispatchEvent(new CustomEvent("notifications:updated"));
+            if (
+              n.type === "COMPETITION_CREATED" ||
+              n.type === "COMPETITION_UPDATED" ||
+              n.type === "COMPETITION_REGISTRATION_OPEN" ||
+              n.type === "COMPETITION_REGISTRATION_CLOSED"
+            ) {
+              invalidateApiCache((key) => {
+                const value = String(key);
+                return value.includes("/competitions")
+                  || value.includes("competitions:")
+                  || value.includes("competition:");
+              });
+              window.dispatchEvent(new CustomEvent("competitions:updated"));
+            }
+            if (
+              n.type === "SUBMISSION_OPEN" ||
+              n.type === "SUBMISSION_SUCCESS" ||
+              n.type === "SUBMISSION_RECEIVED" ||
+              n.type === "SUBMISSION_DEADLINE_PASSED" ||
+              n.type === "SUBMISSION_EVALUATED" ||
+              isParticipationDecisionNotification(n.type, n.title, n.message)
+            ) {
+              invalidateApiCache((key) => {
+                const value = String(key);
+                return value.includes("/submissions")
+                  || value.includes("/teacher/submissions")
+                  || value.includes("/api/external/participations")
+                  || value.includes("external:participations:")
+                  || value.includes("submissions:")
+                  || value.includes("teacher:submissions:");
+              });
+              window.dispatchEvent(new CustomEvent("submissions:updated"));
+            }
           } catch {}
         });
       } catch {}
     }
     return () => {
-      clearInterval(intervalId);
       if (es) es.close();
     };
   }, [role]);
@@ -317,6 +445,10 @@ export function AppLayout({ children, role = "student" }) {
 
   const unreadCount = notifications.filter(n => !n.read).length;
   const avatarSrc = userProfile.avatarUrl ? resolveFileUrl(userProfile.avatarUrl) : "";
+  const handleAvatarError = () => {
+    setUserProfile((prev) => ({ ...prev, avatarUrl: null }));
+    localStorage.removeItem("userAvatarUrl");
+  };
 
   const markAsRead = async (id) => {
     setNotifications(prev => 
@@ -329,6 +461,7 @@ export function AppLayout({ children, role = "student" }) {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}` }
       });
+      invalidateApiCache((key) => String(key).includes("notifications"));
     } catch {}
   };
 
@@ -341,6 +474,7 @@ export function AppLayout({ children, role = "student" }) {
         method: "PUT",
         headers: { Authorization: `Bearer ${token}` }
       });
+      invalidateApiCache((key) => String(key).includes("notifications"));
     } catch {}
   };
 
@@ -361,6 +495,12 @@ export function AppLayout({ children, role = "student" }) {
     localStorage.removeItem("userRole");
     localStorage.removeItem("userAvatarUrl");
     localStorage.removeItem("userId");
+    invalidateApiCache();
+    window.dispatchEvent(new CustomEvent("session:changed"));
+    window.dispatchEvent(new CustomEvent("notifications:updated"));
+    window.dispatchEvent(new CustomEvent("competitions:updated"));
+    window.dispatchEvent(new CustomEvent("submissions:updated"));
+    window.dispatchEvent(new CustomEvent("social:updated"));
     setShowProfile(false);
     navigate("/login");
   };
@@ -373,6 +513,7 @@ export function AppLayout({ children, role = "student" }) {
     }
     const Icon = notificationIcons[notification.type] || Bell;
     const colorClass = notification.type === "team" ? "text-secondary" : 
+                       notification.type === "competition" ? "text-info" :
                        notification.type === "deadline" ? "text-warning" :
                        notification.type === "submission" ? "text-info" :
                        notification.type === "evaluation" ? "text-success" :
@@ -387,6 +528,7 @@ export function AppLayout({ children, role = "student" }) {
       if (notification.status === "pending") return "bg-warning/10";
     }
     if (notification.type === "team" || notification.type === "approval") return "bg-secondary/10";
+    if (notification.type === "competition") return "bg-info/10";
     if (notification.type === "deadline") return "bg-warning/10";
     if (notification.type === "submission") return "bg-info/10";
     if (notification.type === "evaluation") return "bg-success/10";
@@ -562,8 +704,8 @@ export function AppLayout({ children, role = "student" }) {
                 onClick={() => setShowProfile(!showProfile)}
               >
                 <div className="w-8 h-8 rounded-full bg-secondary flex items-center justify-center overflow-hidden">
-                  {userProfile.avatarUrl ? (
-                    <img src={avatarSrc} alt="Avatar" className="w-full h-full object-cover" />
+                  {avatarSrc ? (
+                    <img src={avatarSrc} alt="Avatar" className="w-full h-full object-cover" onError={handleAvatarError} />
                   ) : (
                     <span className="text-sm font-medium text-secondary-foreground">
                       {userProfile.name ? userProfile.name.charAt(0).toUpperCase() : "U"}
@@ -585,8 +727,8 @@ export function AppLayout({ children, role = "student" }) {
                     <div className="p-4 bg-muted/30 border-b border-border">
                       <div className="flex items-center gap-3">
                         <div className="w-12 h-12 rounded-full bg-secondary flex items-center justify-center overflow-hidden">
-                          {userProfile.avatarUrl ? (
-                            <img src={avatarSrc} alt="Avatar" className="w-full h-full object-cover" />
+                          {avatarSrc ? (
+                            <img src={avatarSrc} alt="Avatar" className="w-full h-full object-cover" onError={handleAvatarError} />
                           ) : (
                             <span className="text-lg font-medium text-secondary-foreground">
                               {userProfile.name ? userProfile.name.charAt(0).toUpperCase() : "U"}

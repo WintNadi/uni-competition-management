@@ -1,120 +1,312 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { 
-  Shield, CheckCircle2, XCircle, Clock, FileText, 
-  Users, BarChart3, MessageSquare, Download, Eye,
-  AlertTriangle, TrendingUp, Trophy, Mail, Inbox,
-  ExternalLink, Globe
+import {
+  Shield,
+  CheckCircle2,
+  Clock,
+  Users,
+  BarChart3,
+  FileText,
+  MessageSquare,
+  Download,
+  Eye,
+  AlertTriangle,
+  TrendingUp,
+  Trophy,
+  Mail,
+  Inbox,
+  ExternalLink,
+  Globe,
 } from "lucide-react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { API_BASE_URL, fetchJsonCached } from "@/lib/api";
+import { formatReadableDateTime } from "@/lib/date";
 import { toast } from "sonner";
 
-const mockStats = [
-  { icon: Clock, label: "Pending Approvals", value: "12", trend: "5", trendUp: true },
-  { icon: CheckCircle2, label: "Approved Today", value: "24" },
-  { icon: Users, label: "Active Users", value: "1,234" },
-  { icon: Trophy, label: "Total Achievements", value: "3,567" },
-];
+const isSameLocalDay = (value, referenceDate = new Date()) => {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  return (
+    date.getFullYear() === referenceDate.getFullYear()
+    && date.getMonth() === referenceDate.getMonth()
+    && date.getDate() === referenceDate.getDate()
+  );
+};
 
-const mockApprovals = [
-  {
-    id: 1,
-    type: "external",
-    student: "Emily Chen",
-    competition: "National Coding Championship",
-    achievement: "2nd Place",
-    submittedAt: "2 hours ago",
-    proof: ["certificate.pdf"],
-  },
-  {
-    id: 2,
-    type: "external",
-    student: "James Wilson",
-    competition: "International Math Olympiad",
-    achievement: "Participation",
-    submittedAt: "5 hours ago",
-    proof: ["participation_cert.pdf"],
-  },
-  {
-    id: 3,
-    type: "achievement",
-    student: "Sofia Rodriguez",
-    competition: "AI Innovation Challenge",
-    achievement: "1st Place",
-    submittedAt: "1 day ago",
-    proof: ["winner_photo.jpg", "certificate.pdf"],
-  },
-];
-
-const mockSocialPosts = [
-  {
-    id: 1,
-    author: "Alex Park",
-    content: "Looking for teammates for the upcoming hackathon!",
-    reportCount: 0,
-    status: "published",
-  },
-  {
-    id: 2,
-    author: "Anonymous",
-    content: "Content flagged for review...",
-    reportCount: 3,
-    status: "flagged",
-  },
-];
-
-const mockContactMessages = [
-  {
-    id: 1,
-    student: "John Doe",
-    email: "john.doe@university.edu",
-    subject: "Question about team registration",
-    message: "Hi, I'm having trouble registering my team for the AI Innovation Challenge. The submit button seems to be disabled even though I filled all required fields.",
-    submittedAt: "1 hour ago",
-    status: "unread",
-  },
-  {
-    id: 2,
-    student: "Sarah Kim",
-    email: "sarah.kim@university.edu",
-    subject: "External competition proof rejected",
-    message: "My external competition proof was rejected but I don't understand why. Can you please provide more details about what was missing?",
-    submittedAt: "3 hours ago",
-    status: "unread",
-  },
-  {
-    id: 3,
-    student: "Mike Johnson",
-    email: "mike.j@university.edu",
-    subject: "Request for deadline extension",
-    message: "Due to some technical difficulties, I couldn't submit my project on time. Is it possible to get a short extension?",
-    submittedAt: "1 day ago",
-    status: "read",
-  },
-];
+const toTimestamp = (value) => {
+  if (!value) return 0;
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
+};
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState("approvals");
-  const [contactMessages, setContactMessages] = useState(mockContactMessages);
+  const [loading, setLoading] = useState(true);
+  const [pendingApprovals, setPendingApprovals] = useState([]);
+  const [messages, setMessages] = useState([]);
+  const [socialPosts, setSocialPosts] = useState([]);
   const [selectedMessage, setSelectedMessage] = useState(null);
+  const [loadingMessageDetail, setLoadingMessageDetail] = useState(false);
+  const [statsSnapshot, setStatsSnapshot] = useState({
+    pendingApprovals: 0,
+    approvedToday: 0,
+    activeUsers: 0,
+    totalAchievements: 0,
+  });
 
-  const handleMarkAsRead = (id) => {
-    setContactMessages(prev => prev.map(msg => 
-      msg.id === id ? { ...msg, status: "read" } : msg
-    ));
-    toast.success("Message marked as read");
-  };
+  const loadDashboard = useCallback(async ({ force = false, silent = false } = {}) => {
+    const token = localStorage.getItem("userToken");
+    if (!token) {
+      setPendingApprovals([]);
+      setMessages([]);
+      setSocialPosts([]);
+      setStatsSnapshot({
+        pendingApprovals: 0,
+        approvedToday: 0,
+        activeUsers: 0,
+        totalAchievements: 0,
+      });
+      setSelectedMessage(null);
+      setLoading(false);
+      return;
+    }
 
-  const unreadCount = contactMessages.filter(m => m.status === "unread").length;
+    setLoading(true);
+    try {
+      const [
+        approvalsRaw,
+        supportRaw,
+        socialRaw,
+        achievementsRaw,
+        userStats,
+      ] = await Promise.all([
+        fetchJsonCached(`${API_BASE_URL}/api/external/participations/admin?status=all`, {
+          token,
+          ttlMs: 60000,
+          force,
+          cacheKey: "admin:dashboard:approvals",
+        }),
+        fetchJsonCached(`${API_BASE_URL}/api/support/conversations/admin`, {
+          token,
+          ttlMs: 60000,
+          force,
+          cacheKey: "admin:dashboard:support",
+        }),
+        fetchJsonCached(`${API_BASE_URL}/api/social-feed/admin/posts`, {
+          token,
+          ttlMs: 60000,
+          force,
+          cacheKey: "admin:dashboard:social-posts",
+        }),
+        fetchJsonCached(`${API_BASE_URL}/api/achievements`, {
+          token,
+          ttlMs: 60000,
+          force,
+          cacheKey: "admin:dashboard:achievements",
+        }),
+        fetchJsonCached(`${API_BASE_URL}/api/users/admin/stats`, {
+          token,
+          ttlMs: 60000,
+          force,
+          cacheKey: "admin:dashboard:user-stats",
+        }).catch(() => null),
+      ]);
+
+      const approvals = Array.isArray(approvalsRaw) ? approvalsRaw : [];
+      const supportConversations = Array.isArray(supportRaw) ? supportRaw : [];
+      const socialFeedPosts = Array.isArray(socialRaw) ? socialRaw : [];
+      const achievements = Array.isArray(achievementsRaw) ? achievementsRaw : [];
+
+      const pending = approvals
+        .filter((item) => String(item?.status || "").toLowerCase() === "pending")
+        .slice()
+        .sort((first, second) => {
+          const firstValue = first?.submittedAt || first?.createdAt || first?.updatedAt;
+          const secondValue = second?.submittedAt || second?.createdAt || second?.updatedAt;
+          return toTimestamp(secondValue) - toTimestamp(firstValue);
+        })
+        .slice(0, 5)
+        .map((item, index) => ({
+          id: item?.id || item?._id || `pending-${index}`,
+          type: item?.source === "student_created" ? "student-created" : "external-proof",
+          student: item?.student?.name || "Student",
+          competition: item?.competition || item?.title || "Competition",
+          achievement: item?.result || "Participation",
+          submittedAt: formatReadableDateTime(item?.submittedAt || item?.createdAt || item?.updatedAt),
+          proofFiles: Array.isArray(item?.proofFiles) ? item.proofFiles : [],
+        }));
+
+      const supportMessages = supportConversations
+        .slice()
+        .sort((first, second) =>
+          toTimestamp(second?.lastMessageAt) - toTimestamp(first?.lastMessageAt))
+        .slice(0, 10)
+        .map((conversation, index) => ({
+          id: conversation?.id || `conversation-${index}`,
+          student: conversation?.studentName || "Student",
+          email: conversation?.studentEmail || "",
+          subject: conversation?.subject || "Support conversation",
+          message: "Open to view latest message.",
+          submittedAt: formatReadableDateTime(conversation?.lastMessageAt),
+          status: Number(conversation?.unreadForAdmin || 0) > 0 ? "unread" : "read",
+        }));
+
+      const moderationPosts = socialFeedPosts
+        .slice(0, 4)
+        .map((post, index) => ({
+          id: post?.id || `post-${index}`,
+          author: post?.author || "AcademiX System",
+          content: post?.content || "",
+          reportCount: Number(post?.reportCount || 0),
+          status: post?.status || "published",
+        }));
+
+      const approvedToday = approvals.filter((item) => {
+        if (String(item?.status || "").toLowerCase() !== "approved") return false;
+        return isSameLocalDay(item?.approvedAt || item?.updatedAt || item?.submittedAt);
+      }).length;
+
+      const userCountFromApi = Number(userStats?.totalUsers || 0);
+      const fallbackActiveUsers = new Set(
+        approvals
+          .map((item) => item?.student?.id || item?.student?.email || item?.student?.name)
+          .filter(Boolean)
+      ).size;
+
+      setPendingApprovals(pending);
+      setMessages(supportMessages);
+      setSocialPosts(moderationPosts);
+      setStatsSnapshot({
+        pendingApprovals: pending.length,
+        approvedToday,
+        activeUsers: userCountFromApi || fallbackActiveUsers,
+        totalAchievements: achievements.length,
+      });
+    } catch (error) {
+      if (!silent) {
+        toast.error(error?.message || "Unable to load admin dashboard data");
+      }
+      setPendingApprovals([]);
+      setMessages([]);
+      setSocialPosts([]);
+      setStatsSnapshot({
+        pendingApprovals: 0,
+        approvedToday: 0,
+        activeUsers: 0,
+        totalAchievements: 0,
+      });
+      setSelectedMessage(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const openMessage = useCallback(async (message) => {
+    setSelectedMessage(message);
+
+    const token = localStorage.getItem("userToken");
+    if (!token || !message?.id) return;
+
+    setLoadingMessageDetail(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/support/conversations/${message.id}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        throw new Error("Unable to load message details.");
+      }
+
+      const conversation = await response.json();
+      const conversationMessages = Array.isArray(conversation?.messages)
+        ? conversation.messages.slice().sort((first, second) =>
+          toTimestamp(first?.createdAt) - toTimestamp(second?.createdAt))
+        : [];
+      const latestMessage = conversationMessages[conversationMessages.length - 1] || null;
+
+      setSelectedMessage((prev) => ({
+        ...(prev || message),
+        subject: conversation?.subject || prev?.subject || message?.subject || "Support conversation",
+        message: latestMessage?.text || "No messages yet.",
+        submittedAt: formatReadableDateTime(
+          latestMessage?.createdAt || conversation?.lastMessageAt || conversation?.updatedAt
+        ),
+        status: "read",
+      }));
+
+      setMessages((prev) =>
+        prev.map((item) =>
+          item.id === message.id
+            ? { ...item, status: "read" }
+            : item
+        ));
+    } catch (error) {
+      toast.error(error?.message || "Failed to open message.");
+    } finally {
+      setLoadingMessageDetail(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDashboard({ force: false });
+  }, [loadDashboard]);
+
+  useEffect(() => {
+    const refresh = () => loadDashboard({ force: true, silent: true });
+    window.addEventListener("social:updated", refresh);
+    window.addEventListener("notifications:updated", refresh);
+    window.addEventListener("submissions:updated", refresh);
+    window.addEventListener("session:changed", refresh);
+    return () => {
+      window.removeEventListener("social:updated", refresh);
+      window.removeEventListener("notifications:updated", refresh);
+      window.removeEventListener("submissions:updated", refresh);
+      window.removeEventListener("session:changed", refresh);
+    };
+  }, [loadDashboard]);
+
+  const unreadCount = useMemo(
+    () => messages.filter((item) => item.status === "unread").length,
+    [messages]
+  );
+
+  const stats = useMemo(
+    () => [
+      {
+        id: "pending",
+        icon: Clock,
+        label: "Pending Approvals",
+        value: String(statsSnapshot.pendingApprovals),
+      },
+      {
+        id: "approved-today",
+        icon: CheckCircle2,
+        label: "Approved Today",
+        value: String(statsSnapshot.approvedToday),
+      },
+      {
+        id: "active-users",
+        icon: Users,
+        label: "Active Users",
+        value: String(statsSnapshot.activeUsers),
+      },
+      {
+        id: "achievements",
+        icon: Trophy,
+        label: "Total Achievements",
+        value: String(statsSnapshot.totalAchievements),
+      },
+    ],
+    [statsSnapshot]
+  );
 
   return (
     <AppLayout role="admin">
       <div className="max-w-7xl mx-auto space-y-6 animate-fade-in">
-        {/* Header */}
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div>
             <h1 className="text-2xl lg:text-3xl font-display font-bold text-foreground">
@@ -140,14 +332,12 @@ export default function AdminDashboard() {
           </div>
         </div>
 
-        {/* Stats */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {mockStats.map((stat, index) => (
-            <StatCard key={index} {...stat} />
+          {stats.map((stat) => (
+            <StatCard key={stat.id} {...stat} />
           ))}
         </div>
 
-        {/* Tabs */}
         <div className="flex rounded-lg border border-border overflow-hidden w-fit">
           <button
             onClick={() => setActiveTab("approvals")}
@@ -180,7 +370,6 @@ export default function AdminDashboard() {
 
         {activeTab === "approvals" && (
           <div className="grid lg:grid-cols-3 gap-6">
-            {/* Pending Approvals */}
             <div className="lg:col-span-2">
               <div className="card-static p-5">
                 <div className="flex items-center justify-between mb-4">
@@ -189,13 +378,16 @@ export default function AdminDashboard() {
                     Pending Approvals
                   </h2>
                   <span className="badge-status bg-warning/10 text-warning">
-                    12 pending
+                    {pendingApprovals.length} pending
                   </span>
                 </div>
 
                 <div className="space-y-3">
-                  {mockApprovals.map((item) => (
-                    <div 
+                  {loading && (
+                    <p className="text-sm text-muted-foreground">Loading approvals...</p>
+                  )}
+                  {!loading && pendingApprovals.map((item) => (
+                    <div
                       key={item.id}
                       className="p-4 rounded-lg border border-border bg-muted/20"
                     >
@@ -208,43 +400,34 @@ export default function AdminDashboard() {
                             </span>
                           </div>
                           <p className="text-sm text-muted-foreground">
-                            {item.competition} • {item.achievement}
+                            {item.competition} - {item.achievement}
                           </p>
                           <p className="text-xs text-muted-foreground mt-1">
                             Submitted {item.submittedAt}
                           </p>
                         </div>
                         <div className="flex items-center gap-1">
-                          {item.proof.map((file, index) => (
-                            <Button key={index} variant="ghost" size="icon-sm" title={file}>
+                          {item.proofFiles.map((file, index) => (
+                            <Button key={`${item.id}-${index}`} variant="ghost" size="icon-sm" title={file}>
                               <Eye className="w-4 h-4" />
                             </Button>
                           ))}
                         </div>
                       </div>
-                      <div className="flex gap-2">
-                        <Button size="sm" className="gap-1 flex-1">
-                          <CheckCircle2 className="w-4 h-4" />
-                          Approve
-                        </Button>
-                        <Button variant="outline" size="sm" className="gap-1 flex-1 text-destructive hover:bg-destructive/10">
-                          <XCircle className="w-4 h-4" />
-                          Reject
-                        </Button>
-                      </div>
                     </div>
                   ))}
+                  {!loading && pendingApprovals.length === 0 && (
+                    <p className="text-sm text-muted-foreground">No pending approvals.</p>
+                  )}
                 </div>
 
                 <Button variant="outline" className="w-full mt-4" onClick={() => navigate("/admin/approvals")}>
-                  View All Pending ({mockApprovals.length})
+                  View All Pending ({statsSnapshot.pendingApprovals})
                 </Button>
               </div>
             </div>
 
-            {/* Sidebar */}
             <div className="space-y-6">
-              {/* Quick Actions */}
               <div className="card-static p-5">
                 <h2 className="font-display font-semibold text-lg mb-4 flex items-center gap-2">
                   <ExternalLink className="w-5 h-5 text-secondary" />
@@ -265,7 +448,7 @@ export default function AdminDashboard() {
                   </Button>
                 </div>
               </div>
-              {/* Quick Reports */}
+
               <div className="card-static p-5">
                 <h2 className="font-display font-semibold text-lg mb-4 flex items-center gap-2">
                   <FileText className="w-5 h-5 text-secondary" />
@@ -287,68 +470,46 @@ export default function AdminDashboard() {
                 </div>
               </div>
 
-              {/* Social Control */}
               <div className="card-static p-5">
                 <h2 className="font-display font-semibold text-lg mb-4 flex items-center gap-2">
                   <MessageSquare className="w-5 h-5 text-secondary" />
                   Social Control
                 </h2>
                 <div className="space-y-3">
-                  {mockSocialPosts.map((post) => (
-                    <div 
+                  {loading && (
+                    <p className="text-sm text-muted-foreground">Loading social posts...</p>
+                  )}
+                  {!loading && socialPosts.map((post) => (
+                    <div
                       key={post.id}
                       className={cn(
                         "p-3 rounded-lg border",
-                        post.status === "flagged" 
+                        post.status === "hidden"
                           ? "border-destructive/30 bg-destructive/5"
                           : "border-border bg-muted/30"
                       )}
                     >
                       <div className="flex items-start justify-between mb-2">
                         <span className="text-sm font-medium">{post.author}</span>
-                        {post.status === "flagged" && (
+                        {post.status === "hidden" && (
                           <span className="badge-status bg-destructive/10 text-destructive text-xs flex items-center gap-1">
                             <AlertTriangle className="w-3 h-3" />
-                            {post.reportCount} reports
+                            hidden
                           </span>
                         )}
                       </div>
                       <p className="text-sm text-muted-foreground mb-2 line-clamp-2">
                         {post.content}
                       </p>
-                      {post.status === "flagged" && (
-                        <div className="flex gap-2">
-                          <Button size="sm" variant="outline" className="flex-1 text-xs">
-                            Dismiss
-                          </Button>
-                          <Button size="sm" variant="outline" className="flex-1 text-xs text-destructive">
-                            Remove
-                          </Button>
-                        </div>
-                      )}
                     </div>
                   ))}
+                  {!loading && socialPosts.length === 0 && (
+                    <p className="text-sm text-muted-foreground">No social posts.</p>
+                  )}
                 </div>
-              </div>
-
-              {/* System Health */}
-              <div className="card-static p-5">
-                <h2 className="font-display font-semibold text-lg mb-4">System Status</h2>
-                <div className="space-y-3">
-                  {[
-                    { label: "Database", status: "healthy" },
-                    { label: "File Storage", status: "healthy" },
-                    { label: "Email Service", status: "warning" },
-                  ].map((item, index) => (
-                    <div key={index} className="flex items-center justify-between">
-                      <span className="text-sm">{item.label}</span>
-                      <span className={cn(
-                        "w-2 h-2 rounded-full",
-                        item.status === "healthy" ? "bg-success" : "bg-warning"
-                      )} />
-                    </div>
-                  ))}
-                </div>
+                <Button variant="outline" className="w-full mt-4" onClick={() => navigate("/admin/social-moderation")}>
+                  Open Moderation
+                </Button>
               </div>
             </div>
           </div>
@@ -356,7 +517,6 @@ export default function AdminDashboard() {
 
         {activeTab === "messages" && (
           <div className="grid lg:grid-cols-3 gap-6">
-            {/* Messages List */}
             <div className="lg:col-span-2">
               <div className="card-static p-5">
                 <div className="flex items-center justify-between mb-4">
@@ -370,17 +530,20 @@ export default function AdminDashboard() {
                 </div>
 
                 <div className="space-y-3">
-                  {contactMessages.map((msg) => (
-                    <div 
+                  {loading && (
+                    <p className="text-sm text-muted-foreground">Loading messages...</p>
+                  )}
+                  {!loading && messages.map((msg) => (
+                    <div
                       key={msg.id}
                       className={cn(
                         "p-4 rounded-lg border cursor-pointer transition-colors",
-                        msg.status === "unread" 
+                        msg.status === "unread"
                           ? "border-secondary/30 bg-secondary/5 hover:bg-secondary/10"
                           : "border-border bg-muted/20 hover:bg-muted/40",
                         selectedMessage?.id === msg.id && "ring-2 ring-secondary"
                       )}
-                      onClick={() => setSelectedMessage(msg)}
+                      onClick={() => openMessage(msg)}
                     >
                       <div className="flex items-start justify-between mb-2">
                         <div className="flex items-center gap-2">
@@ -397,7 +560,7 @@ export default function AdminDashboard() {
                   ))}
                 </div>
 
-                {contactMessages.length === 0 && (
+                {!loading && messages.length === 0 && (
                   <div className="text-center py-8">
                     <Mail className="w-12 h-12 mx-auto mb-4 text-muted-foreground opacity-50" />
                     <p className="text-muted-foreground">No messages yet</p>
@@ -406,44 +569,41 @@ export default function AdminDashboard() {
               </div>
             </div>
 
-            {/* Message Detail */}
             <div className="card-static p-5">
               <h2 className="font-display font-semibold text-lg mb-4 flex items-center gap-2">
                 <Mail className="w-5 h-5 text-secondary" />
                 Message Details
               </h2>
-              
+
               {selectedMessage ? (
                 <div className="space-y-4">
                   <div>
                     <p className="text-xs text-muted-foreground">From</p>
                     <p className="font-medium">{selectedMessage.student}</p>
-                    <p className="text-sm text-muted-foreground">{selectedMessage.email}</p>
+                    <p className="text-sm text-muted-foreground">{selectedMessage.email || "-"}</p>
                   </div>
-                  
+
                   <div>
                     <p className="text-xs text-muted-foreground">Subject</p>
                     <p className="font-medium">{selectedMessage.subject}</p>
                   </div>
-                  
+
                   <div>
                     <p className="text-xs text-muted-foreground">Message</p>
-                    <p className="text-sm text-foreground whitespace-pre-wrap">{selectedMessage.message}</p>
+                    <p className="text-sm text-foreground whitespace-pre-wrap">
+                      {loadingMessageDetail ? "Loading..." : selectedMessage.message}
+                    </p>
                   </div>
-                  
+
                   <div className="pt-4 border-t border-border space-y-2">
-                    {selectedMessage.status === "unread" && (
-                      <Button 
-                        className="w-full gap-2"
-                        onClick={() => handleMarkAsRead(selectedMessage.id)}
-                      >
-                        <CheckCircle2 className="w-4 h-4" />
-                        Mark as Read
-                      </Button>
-                    )}
-                    <Button variant="outline" className="w-full gap-2">
+                    <Button
+                      variant="outline"
+                      className="w-full gap-2"
+                      onClick={() => openMessage(selectedMessage)}
+                      disabled={loadingMessageDetail}
+                    >
                       <Mail className="w-4 h-4" />
-                      Reply via Email
+                      Refresh Conversation
                     </Button>
                   </div>
                 </div>

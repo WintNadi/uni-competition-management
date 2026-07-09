@@ -11,6 +11,11 @@ public record TeamResponseDTO(
                 String leaderId,
                 List<String> memberIds,
                 List<String> acceptedMemberIds,
+                List<String> pendingJoinRequestIds,
+                String leaderUsername,
+                List<String> memberUsernames,
+                List<String> acceptedMemberUsernames,
+                List<String> pendingJoinRequestUsernames,
 
                 String status // ACTIVE | PENDING
 ) {

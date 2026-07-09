@@ -11,7 +11,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.project.Backend.Auth.security.services.UserDetailsImpl;
+import com.project.Backend.Auth.UserDetailsImpl;
 import com.project.Backend.User.ResponseDTO.MessageResponse;
 
 import lombok.RequiredArgsConstructor;
@@ -29,7 +29,7 @@ public class MilestoneController {
         if (studentId == null) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(new MessageResponse("Unauthorized"));
         }
-        List<Milestone> milestones = repository.findByUserId(studentId);
+        List<Milestone> milestones = repository.findByStudentId(studentId);
         return ResponseEntity.ok(milestones);
     }
 

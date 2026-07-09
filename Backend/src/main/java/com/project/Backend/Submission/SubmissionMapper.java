@@ -106,18 +106,22 @@ public class SubmissionMapper {
 
         public static SubmissionCoreDTO toResponse(
                         Submission s,
-                        Competition competition) {
+                        Competition competition,
+                        String teamName) {
                 LocalDateTime now = LocalDateTime.now();
 
                 LocalDateTime registrationDeadline = competition != null
-                                ? competition.getRegistrationDeadline()
+                                ? (competition.getRegistrationClose() != null
+                                                ? competition.getRegistrationClose()
+                                                : competition.getRegistrationDeadline())
                                 : null;
                 LocalDateTime submissionDeadline = competition != null
                                 ? competition.getSubmissionDeadline()
                                 : null;
 
-                boolean submissionOpen = (registrationDeadline == null || now.isAfter(registrationDeadline)) &&
-                                (submissionDeadline == null || now.isBefore(submissionDeadline));
+                boolean afterOpen = registrationDeadline == null || !now.isBefore(registrationDeadline);
+                boolean beforeClose = submissionDeadline == null || !now.isAfter(submissionDeadline);
+                boolean submissionOpen = afterOpen && beforeClose;
 
                 boolean canSubmit = submissionOpen;
 
@@ -125,18 +129,38 @@ public class SubmissionMapper {
                                 competition != null &&
                                 !"QUIZ".equalsIgnoreCase(competition.getFormat());
 
+                Integer marksAwarded = s.getEvaluation() != null
+                                ? s.getEvaluation().getMarksAwarded()
+                                : s.getMarksAwarded();
+                String feedback = s.getEvaluation() != null
+                                ? s.getEvaluation().getFeedback()
+                                : s.getFeedback();
+                var questionScores = s.getEvaluation() != null
+                                ? s.getEvaluation().getQuestionScores()
+                                : null;
+
+                Integer autoMarksAwarded = s.getAutoMarksAwarded();
+                var autoQuestionScores = s.getAutoQuestionScores();
+
                 return new SubmissionCoreDTO(
                                 s.getSubmissionId(),
                                 s.getCompetitionId(),
                                 s.getTeamId(),
+                                teamName,
                                 s.getSubmittedBy(),
                                 s.getSubmissionType(),
                                 s.getRepoLink(),
                                 s.getFile(),
+                                s.getQuizQuestionIds(),
                                 s.getQuizAnswers(),
                                 s.isTeamSubmission(),
                                 s.getDescription(),
                                 s.getSubmissionStatus(),
+                                autoMarksAwarded,
+                                marksAwarded,
+                                feedback,
+                                autoQuestionScores,
+                                questionScores,
                                 s.getSubmittedAt(),
                                 canSubmit,
                                 canEdit);

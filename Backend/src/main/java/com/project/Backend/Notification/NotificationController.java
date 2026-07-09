@@ -2,7 +2,7 @@ package com.project.Backend.Notification;
 
 import com.project.Backend.Notification.Notification;
 import com.project.Backend.Notification.NotificationService;
-import com.project.Backend.Auth.security.jwt.JwtUtils;
+import com.project.Backend.Auth.JwtUtils;
 import com.project.Backend.User.User;
 import com.project.Backend.User.UserRepository;
 import com.project.Backend.User.ResponseDTO.MessageResponse;
@@ -12,7 +12,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
-import com.project.Backend.Auth.security.services.UserDetailsImpl;
+import com.project.Backend.Auth.UserDetailsImpl;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;

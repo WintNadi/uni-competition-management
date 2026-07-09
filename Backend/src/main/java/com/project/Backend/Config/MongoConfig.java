@@ -1,6 +1,5 @@
 package com.project.Backend.Config;
 
-import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.gridfs.GridFSBucket;
 import com.mongodb.client.gridfs.GridFSBuckets;
 import org.springframework.context.annotation.Bean;
@@ -12,7 +11,7 @@ public class MongoConfig {
 
     @Bean
     public GridFSBucket gridFSBucket(MongoDatabaseFactory mongoDatabaseFactory) {
-        MongoDatabase database = mongoDatabaseFactory.getMongoDatabase();
-        return GridFSBuckets.create(database);
+        // Always use the currently configured database from spring.data.mongodb.uri
+        return GridFSBuckets.create(mongoDatabaseFactory.getMongoDatabase());
     }
 }

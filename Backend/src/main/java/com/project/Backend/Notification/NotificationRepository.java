@@ -8,4 +8,9 @@ public interface NotificationRepository extends MongoRepository<Notification, St
     List<Notification> findByRecipientIdOrderByCreatedAtDesc(String recipientId);
 
     List<Notification> findByRecipientIdAndIsReadFalse(String recipientId);
+
+    boolean existsByRecipientIdAndTypeAndRelatedEntityId(
+            String recipientId,
+            NotificationType type,
+            String relatedEntityId);
 }

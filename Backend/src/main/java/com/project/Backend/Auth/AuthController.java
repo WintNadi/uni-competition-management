@@ -20,15 +20,15 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import com.project.Backend.User.Role;
+import com.project.Backend.Auth.Role;
 import com.project.Backend.User.User;
-import com.project.Backend.User.ReqDTO.LoginRequest;
-import com.project.Backend.User.ReqDTO.SignupRequest;
-import com.project.Backend.User.ResponseDTO.JwtResponse;
-import com.project.Backend.User.ResponseDTO.MessageResponse;
+import com.project.Backend.Auth.LoginRequest;
+import com.project.Backend.Auth.SignupRequest;
+import com.project.Backend.Auth.JwtResponse;
+import com.project.Backend.Common.response.ApiResponse;
 import com.project.Backend.User.UserRepository;
-import com.project.Backend.Auth.security.jwt.JwtUtils;
-import com.project.Backend.Auth.security.services.UserDetailsImpl;
+import com.project.Backend.Auth.JwtUtils;
+import com.project.Backend.Auth.UserDetailsImpl;
 
 @CrossOrigin(origins = "*", maxAge = 3600)
 @RestController
@@ -50,7 +50,7 @@ public class AuthController {
     public ResponseEntity<?> authenticateUser(@Valid @RequestBody LoginRequest loginRequest) {
 
         Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(loginRequest.email(), loginRequest.password()));
+                new UsernamePasswordAuthenticationToken(loginRequest.getUsername(), loginRequest.getPassword()));
 
         SecurityContextHolder.getContext().setAuthentication(authentication);
         String jwt = jwtUtils.generateJwtToken(authentication);
@@ -61,12 +61,12 @@ public class AuthController {
                 .collect(Collectors.toList());
         
         // Validate requested role if provided
-        if (loginRequest.role() != null && !loginRequest.role().isEmpty()) {
-            String requestedRole = "ROLE_" + loginRequest.role().toUpperCase();
+        if (loginRequest.getRole() != null && !loginRequest.getRole().isEmpty()) {
+            String requestedRole = "ROLE_" + loginRequest.getRole().toUpperCase();
             if (!roles.contains(requestedRole)) {
                 return ResponseEntity
                         .status(403)
-                        .body(new MessageResponse("Error: Access Denied. You are not registered as a " + loginRequest.role()));
+                        .body(new ApiResponse("Error: Access Denied. You are not registered as a " + loginRequest.getRole()));
             }
         }
 
@@ -79,24 +79,24 @@ public class AuthController {
 
     @PostMapping("/signup")
     public ResponseEntity<?> registerUser(@Valid @RequestBody SignupRequest signUpRequest) {
-        if (userRepository.existsByUsername(signUpRequest.username())) {
+        if (userRepository.existsByUsername(signUpRequest.getUsername())) {
             return ResponseEntity
                     .badRequest()
-                    .body(new MessageResponse("Error: Username is already taken!"));
+                    .body(new ApiResponse("Error: Username is already taken!"));
         }
 
-        if (userRepository.existsByEmail(signUpRequest.email())) {
+        if (userRepository.existsByEmail(signUpRequest.getEmail())) {
             return ResponseEntity
                     .badRequest()
-                    .body(new MessageResponse("Error: Email is already in use!"));
+                    .body(new ApiResponse("Error: Email is already in use!"));
         }
 
         // Create new user's account
-        User user = new User(signUpRequest.username(),
-                signUpRequest.email(),
-                encoder.encode(signUpRequest.password()));
+        User user = new User(signUpRequest.getUsername(),
+                signUpRequest.getEmail(),
+                encoder.encode(signUpRequest.getPassword()));
 
-        Set<String> strRoles = signUpRequest.roles();
+        Set<String> strRoles = signUpRequest.getRoles();
         Set<Role> roles = new HashSet<>();
 
         if (strRoles == null) {
@@ -117,6 +117,6 @@ public class AuthController {
         user.setRoles(roles);
         userRepository.save(user);
 
-        return ResponseEntity.ok(new MessageResponse("User registered successfully!"));
+        return ResponseEntity.ok(new ApiResponse("User registered successfully!"));
     }
 }

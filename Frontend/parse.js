@@ -1,0 +1,1 @@
+const fs=require('fs'); const parser=require('@babel/parser'); try{ const code=fs.readFileSync('src/pages/admin/AdminApprovals.jsx','utf8'); parser.parse(code,{sourceType:'module',plugins:['jsx']}); console.log('parsed ok'); }catch(e){ console.error('parse error',e.message); }  

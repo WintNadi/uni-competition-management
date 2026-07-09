@@ -81,6 +81,7 @@ export default function Login() {
       
       const payload = isLogin 
         ? {
+            username: formData.email,
             email: formData.email,
             password: formData.password,
             role: selectedRole
@@ -146,6 +147,8 @@ export default function Login() {
           ? data.roles[0].replace('ROLE_', '').toLowerCase() 
           : "student";
         localStorage.setItem("userRole", role);
+
+        window.dispatchEvent(new CustomEvent("session:changed"));
         
         toast.success("Login successful!");
         

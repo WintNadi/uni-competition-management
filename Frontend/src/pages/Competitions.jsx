@@ -1,49 +1,13 @@
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Search, Filter, Calendar, Users, Clock, ExternalLink, Building, User, UsersRound, Eye } from "lucide-react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { Link } from "react-router-dom";
-import { API_BASE_URL } from "@/lib/api";
+import { toast } from "sonner";
+import { API_BASE_URL, fetchJsonCached } from "@/lib/api";
 
-const formatDate = (value) => {
-  if (!value) return "";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-};
-
-const deriveStatus = (registrationDeadline) => {
-  if (!registrationDeadline) return "open";
-  const d = new Date(registrationDeadline);
-  if (Number.isNaN(d.getTime())) return "open";
-  return new Date() > d ? "closed" : "open";
-};
-
-const normalizeCompetition = (raw) => {
-  const type = (raw?.competitionType || raw?.type || "internal").toLowerCase();
-  const participation = (raw?.participationType || raw?.participation || "individual").toLowerCase();
-  const deadlineRaw = raw?.submissionDeadline || raw?.registrationDeadline || raw?.deadline;
-  return {
-    id: raw?.competitionId || raw?.id,
-    title: raw?.title || "Untitled Competition",
-    description: raw?.description || (raw?.format ? `${raw.format} competition` : ""),
-    category: raw?.category || raw?.format || "General",
-    deadline: formatDate(deadlineRaw),
-    deadlineRaw,
-    registrationDeadline: raw?.registrationDeadline,
-    submissionDeadline: raw?.submissionDeadline,
-    status: raw?.status || deriveStatus(raw?.registrationDeadline),
-    type,
-    participation,
-    participants: raw?.participants,
-    organizer: raw?.organizer,
-    startDate: raw?.startDate ? formatDate(raw.startDate) : "",
-    endDate: raw?.endDate ? formatDate(raw.endDate) : "",
-    websiteLink: raw?.websiteLink,
-    raw,
-  };
-};
+// Competitions are loaded from the backend API; no local mock list is used here.
 
 const statusStyles = {
   open: "bg-success/10 text-success border-success/20",
@@ -70,45 +34,225 @@ const statusFilters = [
   { label: "Closed", value: "closed" },
 ];
 
+// Map backend competition status (PUBLISHED/CLOSED/DRAFT) and dates to student-facing status
+const mapInternalStatus = (backendStatus, registrationOpen, registrationClose, submissionDeadline) => {
+  const now = new Date();
+  const regOpen = registrationOpen ? new Date(registrationOpen) : null;
+  const regClose = registrationClose ? new Date(registrationClose) : null;
+  const submit = submissionDeadline ? new Date(submissionDeadline) : null;
+
+  const upperStatus = backendStatus ? String(backendStatus).toUpperCase() : "DRAFT";
+
+  if (upperStatus === "CLOSED") return "closed";
+  if (upperStatus === "DRAFT") return "upcoming";
+
+  if (regOpen && !Number.isNaN(regOpen.getTime()) && now < regOpen) return "upcoming";
+  if (regClose && !Number.isNaN(regClose.getTime()) && now > regClose) return "closed";
+  if (submit && !Number.isNaN(submit.getTime()) && now > submit) return "closed";
+
+  return "open";
+};
+
+const mapFormatToCategory = (format) => {
+  if (!format) return "Internal Competition";
+  const lower = String(format).toLowerCase();
+  if (lower === "quiz") return "Quiz";
+  if (lower === "assignment") return "Assignment";
+  if (lower === "project") return "Project";
+  return "Internal Competition";
+};
+
 export default function Competitions() {
-  const [competitions, setCompetitions] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
+  const [competitions, setCompetitions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const hasLoadedRef = useRef(false);
+  const isLoadingDataRef = useRef(false);
+  const pendingReloadRef = useRef(false);
+  const pendingReloadForceRef = useRef(false);
+
+  const toSortTimestamp = (value) => {
+    if (!value) return 0;
+    const parsed = new Date(value).getTime();
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
 
   useEffect(() => {
-    const fetchCompetitions = async () => {
-      const token = localStorage.getItem("userToken");
+    const token = typeof window !== "undefined" ? localStorage.getItem("userToken") : null;
+    if (!token) {
+      // No token: don't populate with local mocks. Leave list empty.
+      setCompetitions([]);
+      hasLoadedRef.current = false;
+      setLoading(false);
+      return;
+    }
+
+    const mapExternalStatus = (registrationOpen, registrationClose, startDate, endDate) => {
+      const now = new Date();
+
+      const regOpen = registrationOpen ? new Date(registrationOpen) : null;
+      const regClose = registrationClose ? new Date(registrationClose) : null;
+      const hasWindow = regOpen && !Number.isNaN(regOpen.getTime())
+        && regClose && !Number.isNaN(regClose.getTime());
+
+      if (hasWindow) {
+        if (now < regOpen) return "upcoming";
+        if (now > regClose) return "closed";
+        return "open";
+      }
+
+      const end = endDate ? new Date(endDate) : null;
+      if (end && now > end) return "closed";
+
+      const start = startDate ? new Date(startDate) : null;
+      if (start && now < start) return "upcoming";
+
+      return "upcoming";
+    };
+
+    const load = async (force = false) => {
+      if (isLoadingDataRef.current) {
+        pendingReloadRef.current = true;
+        pendingReloadForceRef.current = pendingReloadForceRef.current || force;
+        return;
+      }
+
+      isLoadingDataRef.current = true;
+      const shouldShowLoading = !hasLoadedRef.current;
+      if (shouldShowLoading) {
+        setLoading(true);
+      }
       try {
-        const res = await fetch(`${API_BASE_URL}/competitions`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        const data = await fetchJsonCached(`${API_BASE_URL}/api/competitions`, {
+          token,
+          ttlMs: 300000,
+          force,
+          cacheKey: "competitions:list",
         });
-        if (!res.ok) {
-          throw new Error(`Failed to load competitions (${res.status})`);
-        }
-        const data = await res.json().catch(() => []);
-        setCompetitions(Array.isArray(data) ? data : []);
-        setLoadError("");
-      } catch (err) {
-        setLoadError(err.message || "Failed to load competitions");
+        const mappedCompetitions = (Array.isArray(data) ? data : [])
+          .filter((c) => {
+            const s = c.status ? String(c.status).toUpperCase() : "DRAFT";
+            return s !== "DRAFT";
+          })
+          .map((c) => {
+            const id = c.competitionId || c.id;
+            if (!id) return null;
+
+            const typeRaw = String(c.competitionType || c.type || "INTERNAL").toUpperCase();
+            const type = typeRaw.includes("EXTERNAL") ? "external" : "internal";
+            const participation = String(c.participationType || c.participation || "INDIVIDUAL").toUpperCase() === "TEAM"
+              ? "team"
+              : "individual";
+
+            if (type === "internal") {
+              const status = mapInternalStatus(
+                c.status,
+                c.registrationOpen,
+                c.registrationClose || c.registrationDeadline,
+                c.submissionDeadline
+              );
+
+              const deadlineDate = c.submissionDeadline
+                ? new Date(c.submissionDeadline)
+                : (c.registrationClose || c.registrationDeadline ? new Date(c.registrationClose || c.registrationDeadline) : null);
+
+              return {
+                id,
+                title: c.title,
+                description: c.description,
+                category: mapFormatToCategory(c.format),
+                deadline: deadlineDate ? deadlineDate.toLocaleDateString() : "-",
+                participants: c.participants || 0,
+                status,
+                type: "internal",
+                participation,
+                createdBy: c.createdByName || null,
+                sortDate: c.createdAt || c.publishDate || c.registrationOpen || c.submissionDeadline || null,
+              };
+            }
+
+            const start = c.startDate || c.start;
+            const end = c.endDate || c.end;
+            const registrationOpen = c.registrationOpen || null;
+            const registrationClose = c.registrationClose || c.registrationDeadline || null;
+            return {
+              id,
+              title: c.title,
+              description: c.description,
+              category: c.category || c.format || "External Competition",
+              customCategory: c.customCategory || null,
+              startDate: start || "-",
+              endDate: end || "-",
+              participants: c.participants || 0,
+              status: mapExternalStatus(registrationOpen, registrationClose, start, end),
+              type: "external",
+              participation,
+              organizer: c.organizer,
+              mode: c.mode,
+              location: c.location,
+              scale: c.scale,
+              websiteLink: c.websiteLink || c.website,
+              createdBy: c.createdByName || null,
+              sortDate: c.createdAt || start || end || null,
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => toSortTimestamp(b.sortDate) - toSortTimestamp(a.sortDate));
+
+        setCompetitions(mappedCompetitions);
+      } catch (error) {
+        toast.error("An error occurred while loading competitions");
+        setCompetitions([]);
       } finally {
-        setLoading(false);
+        hasLoadedRef.current = true;
+        if (shouldShowLoading) {
+          setLoading(false);
+        }
+        isLoadingDataRef.current = false;
+        if (pendingReloadRef.current) {
+          const queuedForce = pendingReloadForceRef.current;
+          pendingReloadRef.current = false;
+          pendingReloadForceRef.current = false;
+          void load(queuedForce);
+        }
       }
     };
-    fetchCompetitions();
+
+    load();
+    const handleCompetitionUpdate = () => load(false);
+    window.addEventListener("competitions:updated", handleCompetitionUpdate);
+
+    return () => {
+      window.removeEventListener("competitions:updated", handleCompetitionUpdate);
+    };
   }, []);
 
-  const normalizedCompetitions = competitions.map(normalizeCompetition);
-
-  const filteredCompetitions = normalizedCompetitions.filter((comp) => {
+    const filteredCompetitions = competitions.filter((comp) => {
     const matchesType = typeFilter === "all" || comp.type === typeFilter;
     const matchesStatus = statusFilter === "all" || comp.status === statusFilter;
-    const matchesSearch = (comp.title || "").toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (comp.category || "").toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSearch = comp.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      comp.category.toLowerCase().includes(searchQuery.toLowerCase());
     return matchesType && matchesStatus && matchesSearch;
   });
+
+  const getCategoryDisplay = (comp) => {
+    if (!comp?.category) return "Other";
+
+    if (
+      comp.category.toLowerCase() === "other" &&
+      comp.customCategory
+    ) {
+      return comp.customCategory;
+    }
+
+    return (
+      comp.category.charAt(0).toUpperCase() +
+      comp.category.slice(1)
+    );
+  };
+
 
   return (
     <AppLayout role="student">
@@ -179,12 +323,7 @@ export default function Competitions() {
               Loading competitions...
             </div>
           )}
-          {!loading && loadError && (
-            <div className="card-static p-6 text-center text-destructive">
-              {loadError}
-            </div>
-          )}
-          {filteredCompetitions.map((competition) => (
+          {!loading && filteredCompetitions.map((competition) => (
             <div 
               key={competition.id} 
               className="card-elevated p-6 group"
@@ -192,12 +331,12 @@ export default function Competitions() {
               <div className="flex flex-col lg:flex-row lg:items-start gap-4">
                 <div className="flex-1">
                   <div className="flex flex-wrap items-center gap-2 mb-2">
-                    {/* Only show status badge for internal competitions */}
-                    {competition.type === "internal" && competition.status && statusStyles[competition.status] && (
+                    {competition.status && (
                       <span className={cn("badge-status border", statusStyles[competition.status])}>
                         {statusLabels[competition.status]}
                       </span>
                     )}
+
                     <span className="badge-status bg-muted text-muted-foreground flex items-center gap-1">
                       {competition.type === "external" ? (
                         <ExternalLink className="w-3 h-3" />
@@ -206,6 +345,10 @@ export default function Competitions() {
                       )}
                       {competition.type}
                     </span>
+                    <span className="badge-status bg-secondary/10 text-secondary">
+                      {getCategoryDisplay(competition)}
+                    </span>
+
                     <span className={cn(
                       "badge-status flex items-center gap-1",
                       competition.participation === "team" 
@@ -235,24 +378,24 @@ export default function Competitions() {
                   
                     <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
                       {competition.type === "internal" ? (
-                        competition.deadline && (
-                          <span className="flex items-center gap-1.5">
-                            <Calendar className="w-4 h-4" />
-                            Deadline: {competition.deadline}
-                          </span>
-                        )
-                      ) : competition.startDate && competition.endDate ? (
-                        <span className="flex items-center gap-1.5">
-                          <Calendar className="w-4 h-4" />
-                          {competition.startDate} - {competition.endDate}
-                        </span>
-                      ) : competition.deadline ? (
                         <span className="flex items-center gap-1.5">
                           <Calendar className="w-4 h-4" />
                           Deadline: {competition.deadline}
                         </span>
-                      ) : null}
-                      {competition.type === "internal" && competition.participants != null && (
+                      ) : (
+                        <span className="flex items-center gap-1.5">
+                          <Calendar className="w-4 h-4" />
+                          {competition.startDate
+                            ? new Date(competition.startDate).toLocaleDateString()
+                            : "-"}
+                          {" - "}
+                          {competition.endDate
+                            ? new Date(competition.endDate).toLocaleDateString()
+                            : "-"}
+                        </span>
+
+                      )}
+                      {competition.type === "internal" && (
                         <span className="flex items-center gap-1.5">
                           <Users className="w-4 h-4" />
                           {competition.participants} participants
@@ -264,11 +407,13 @@ export default function Competitions() {
                           {competition.organizer}
                         </span>
                       )}
-                      {competition.category && (
-                        <span className="badge-status bg-secondary/10 text-secondary">
-                          {competition.category}
+                      {competition.createdBy && (
+                        <span className="flex items-center gap-1.5">
+                          <User className="w-4 h-4" />
+                          Created by: {competition.createdBy}
                         </span>
                       )}
+
                     </div>
                 </div>
 
@@ -319,7 +464,7 @@ export default function Competitions() {
           ))}
         </div>
 
-        {!loading && !loadError && filteredCompetitions.length === 0 && (
+        {filteredCompetitions.length === 0 && (
           <div className="card-static p-12 text-center">
             <p className="text-muted-foreground">No competitions found matching your criteria.</p>
           </div>
