@@ -25,7 +25,6 @@ A full-stack web application for managing academic competitions at the **Univers
 - [Database Collections](#-database-collections)
 - [Future Enhancements](#-future-enhancements)
 - [Known Limitations](#-known-limitations)
-- [Team Members](#-team-members)
 - [References](#-references)
 
 ---
@@ -385,18 +384,6 @@ Notification Sent
 - 🔍 Plagiarism Detection
 - 🌐 Inter-University Competition Support
 - 📅 Google Calendar Integration
-
----
-
-# 👥 Team Members
-
-| Member | Responsibility |
-|---------|----------------|
-| **Your Name** | User Management, Notification System, Student-Created External Competition |
-| **Member 2** | Competition Management |
-| **Member 3** | Team Formation |
-| **Member 4** | Submission & Evaluation |
-| **Member 5** | External Participation, Social Feed, Attendance Recovery |
 
 ---
 
