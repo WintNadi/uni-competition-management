@@ -347,22 +347,6 @@ Notification Sent
 
 ---
 
-# 📸 Screenshots
-
-> Add screenshots after implementation.
-
-| Page | Preview |
-|------|---------|
-| Login | Coming Soon |
-| Student Dashboard | Coming Soon |
-| Competition List | Coming Soon |
-| Team Management | Coming Soon |
-| Submission | Coming Soon |
-| Social Feed | Coming Soon |
-| Admin Dashboard | Coming Soon |
-
----
-
 # ⚠ Known Limitations
 
 - No mobile application
